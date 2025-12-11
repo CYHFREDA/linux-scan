@@ -551,8 +551,17 @@ systemctl stop process-monitor 2>/dev/null || true
 
 # ===== Fail2ban 統計 =====
 log_and_echo "[$(date '+%H:%M:%S')] 📊 檢查 Fail2ban 狀態..."
-BANNED_COUNT=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $4}' || echo 0)
-TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $4}' || echo 0)
+BANNED_COUNT=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $4}' 2>/dev/null || echo "0")
+TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $4}' 2>/dev/null || echo "0")
+
+# 確保是數字，如果為空或非數字則設為 0
+if ! [[ "$BANNED_COUNT" =~ ^[0-9]+$ ]]; then
+    BANNED_COUNT=0
+fi
+if ! [[ "$TOTAL_BANNED" =~ ^[0-9]+$ ]]; then
+    TOTAL_BANNED=0
+fi
+
 echo "=== Fail2ban 封鎖統計 ===" >> "$REPORT_FILE"
 fail2ban-client status sshd >> "$REPORT_FILE" 2>&1 || echo "Fail2ban 未啟動" >> "$REPORT_FILE"
 log_and_echo "  ✅ 當前封鎖: $BANNED_COUNT, 總計: $TOTAL_BANNED"
@@ -564,7 +573,11 @@ ausearch -ts today 2>/dev/null | grep -E 'passwd|sudoers|shadow|sshd_config' >> 
 
 # ===== 今日登入記錄 =====
 echo "=== 今日登入記錄 ===" >> "$REPORT_FILE"
-LOGIN_COUNT=$(last -F | grep "$(date +%a\ %b\ %e)" | wc -l || echo 0)
+LOGIN_COUNT=$(last -F 2>/dev/null | grep "$(date +%a\ %b\ %e)" 2>/dev/null | wc -l 2>/dev/null || echo 0)
+# 確保是數字
+if ! [[ "$LOGIN_COUNT" =~ ^[0-9]+$ ]]; then
+    LOGIN_COUNT=0
+fi
 LOGIN_USERS=$(last -F | grep "$(date +%a\ %b\ %e)" | awk '{print $1}' | sort -u | tr '\n' ',' | sed 's/,$//' || echo "無")
 last -F | grep "$(date +%a\ %b\ %e)" >> "$REPORT_FILE" 2>&1
 
@@ -575,7 +588,11 @@ dnf check-update --security >> "$REPORT_FILE" 2>&1 || echo "無可用更新" >> 
 
 # ===== 磁碟使用狀態 =====
 echo "=== 磁碟使用狀態 ===" >> "$REPORT_FILE"
-DISK_USAGE=$(df -h / | tail -1 | awk '{print $5}' | tr -d '%')
+DISK_USAGE=$(df -h / 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%' 2>/dev/null || echo "0")
+# 確保是數字
+if ! [[ "$DISK_USAGE" =~ ^[0-9]+$ ]]; then
+    DISK_USAGE=0
+fi
 df -h >> "$REPORT_FILE"
 
 # ===== 記憶體使用狀態 =====
@@ -631,7 +648,11 @@ SENSITIVE_COUNT=$(echo "$SENSITIVE_CHANGES" | grep -v "^$" | wc -l)
 
 # ===== 日誌摘要 (secure) =====
 echo "=== /var/log/secure 今日摘要 ===" >> "$REPORT_FILE"
-FAILED_LOGIN=$(grep "$(date +%b\ %e)" /var/log/secure 2>/dev/null | grep -i "failed" | wc -l || echo 0)
+FAILED_LOGIN=$(grep "$(date +%b\ %e)" /var/log/secure 2>/dev/null | grep -i "failed" 2>/dev/null | wc -l 2>/dev/null || echo 0)
+# 確保是數字
+if ! [[ "$FAILED_LOGIN" =~ ^[0-9]+$ ]]; then
+    FAILED_LOGIN=0
+fi
 grep "$(date +%b\ %e)" /var/log/secure >> "$REPORT_FILE" 2>&1 || echo "無事件" >> "$REPORT_FILE"
 
 # ===== ClamAV 輕量掃描 =====
@@ -707,7 +728,11 @@ fi
 log_and_echo "[$(date '+%H:%M:%S')] 🦠 開始 Maldet 惡意軟體掃描..."
 MALDET_LOG="/opt/security/logs/maldet-$(date +%Y%m%d).log"
 maldet -a /home /var/www > $MALDET_LOG 2>&1 || true
-MALWARE_FOUND=$(grep -i "malware detected" $MALDET_LOG | wc -l || echo 0)
+MALWARE_FOUND=$(grep -i "malware detected" $MALDET_LOG 2>/dev/null | wc -l 2>/dev/null || echo 0)
+# 確保是數字
+if ! [[ "$MALWARE_FOUND" =~ ^[0-9]+$ ]]; then
+    MALWARE_FOUND=0
+fi
 log_and_echo "  ✅ Maldet 掃描完成 - 發現: $MALWARE_FOUND"
 
 # ===== Lynis 每週掃描 (週日) =====
@@ -750,7 +775,35 @@ MSG="$MSG%0A%0A🔧 <b>系統維護</b>"
 MSG="$MSG%0A├ 安全更新: $SECURITY_UPDATES 個"
 MSG="$MSG%0A└ 檔案變動 (24h): $FILE_CHANGES_COUNT"
 
-# 添加警告標記
+# 添加警告標記（確保所有變數都是數字）
+# 安全地轉換變數為數字，如果為空或非數字則設為 0
+BANNED_COUNT=${BANNED_COUNT:-0}
+TOTAL_BANNED=${TOTAL_BANNED:-0}
+INFECTED_COUNT=${INFECTED_COUNT:-0}
+ROOTKIT_WARNINGS=${ROOTKIT_WARNINGS:-0}
+MALWARE_FOUND=${MALWARE_FOUND:-0}
+SENSITIVE_COUNT=${SENSITIVE_COUNT:-0}
+FAILED_LOGIN=${FAILED_LOGIN:-0}
+DISK_USAGE=${DISK_USAGE:-0}
+AUDIT_EVENTS=${AUDIT_EVENTS:-0}
+LOGIN_COUNT=${LOGIN_COUNT:-0}
+SECURITY_UPDATES=${SECURITY_UPDATES:-0}
+FILE_CHANGES_COUNT=${FILE_CHANGES_COUNT:-0}
+
+# 確保是數字（如果不是數字則設為 0）
+if ! [[ "$BANNED_COUNT" =~ ^[0-9]+$ ]]; then BANNED_COUNT=0; fi
+if ! [[ "$TOTAL_BANNED" =~ ^[0-9]+$ ]]; then TOTAL_BANNED=0; fi
+if ! [[ "$INFECTED_COUNT" =~ ^[0-9]+$ ]]; then INFECTED_COUNT=0; fi
+if ! [[ "$ROOTKIT_WARNINGS" =~ ^[0-9]+$ ]]; then ROOTKIT_WARNINGS=0; fi
+if ! [[ "$MALWARE_FOUND" =~ ^[0-9]+$ ]]; then MALWARE_FOUND=0; fi
+if ! [[ "$SENSITIVE_COUNT" =~ ^[0-9]+$ ]]; then SENSITIVE_COUNT=0; fi
+if ! [[ "$FAILED_LOGIN" =~ ^[0-9]+$ ]]; then FAILED_LOGIN=0; fi
+if ! [[ "$DISK_USAGE" =~ ^[0-9]+$ ]]; then DISK_USAGE=0; fi
+if ! [[ "$AUDIT_EVENTS" =~ ^[0-9]+$ ]]; then AUDIT_EVENTS=0; fi
+if ! [[ "$LOGIN_COUNT" =~ ^[0-9]+$ ]]; then LOGIN_COUNT=0; fi
+if ! [[ "$SECURITY_UPDATES" =~ ^[0-9]+$ ]]; then SECURITY_UPDATES=0; fi
+if ! [[ "$FILE_CHANGES_COUNT" =~ ^[0-9]+$ ]]; then FILE_CHANGES_COUNT=0; fi
+
 ALERT_LEVEL="🟢 正常"
 if [ "$BANNED_COUNT" -gt 5 ] || [ "$INFECTED_COUNT" -gt 0 ] || [ "$ROOTKIT_WARNINGS" -gt 0 ] || [ "$DISK_USAGE" -gt 85 ] || [ "$SENSITIVE_COUNT" -gt 0 ]; then
     ALERT_LEVEL="🔴 需要關注"
