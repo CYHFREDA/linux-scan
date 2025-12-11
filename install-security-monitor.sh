@@ -6,7 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || SCRIPT_DIR="/root"
 SCRIPT_NAME="$(basename "$0")"
 cd /tmp 2>/dev/null || cd / 2>/dev/null || true
 
-sudo yum remove snapd snapd-selinux snap-confine -y &&sudo yum -y update
+sudo yum remove snapd snapd-selinux snap-confine -y 2>/dev/null || true
+sudo yum -y update || true
 #########################################
 # Security Monitor v3.5  (Full + Telegram)
 # - 輕量、不卡、全面安全 + 即時 Telegram 通知
@@ -79,7 +80,7 @@ dnf install -y \
     clamav clamav-update clamav-server clamav-server-systemd \
     inotify-tools \
     sysstat logrotate psmisc lsof net-tools \
-    gcc make
+    gcc make bc unzip
 
 # 嘗試安裝 glibc-static（可選，如果找不到也不影響）
 dnf install -y glibc-static 2>/dev/null || echo "⚠️ glibc-static 未安裝（可選套件，不影響功能）"
@@ -150,7 +151,10 @@ fi
 ######################################### 
 # 安裝 chkrootkit
 #########################################
-sudo dnf config-manager --set-enabled crb
+# 嘗試啟用 CRB repository（chkrootkit 可能需要）
+sudo dnf config-manager --set-enabled crb 2>/dev/null || \
+    sudo dnf config-manager --set-enabled powertools 2>/dev/null || true
+
 sudo dnf install chkrootkit -y || {
     echo "Chkrootkit 不存在，改用源碼編譯"
 
@@ -159,24 +163,37 @@ sudo dnf install chkrootkit -y || {
     cd "$WORK_DIR" || cd /tmp
 
     echo "下載 chkrootkit (GitHub Mirror)..."
-    sudo curl -L -o chkrootkit.zip https://github.com/Magentron/chkrootkit/archive/refs/heads/master.zip
-
-    echo "解壓縮..."
-    sudo unzip -oq chkrootkit.zip
-    cd chkrootkit-master || cd /tmp
-
-    echo "編譯..."
-    sudo make sense
-
-    echo "安裝到 /usr/local/bin..."
-    # 複製檔案而不是創建符號連結，避免源目錄被刪除後連結失效
-    sudo cp -f "$(pwd)/chkrootkit" /usr/local/bin/chkrootkit
-    sudo chmod +x /usr/local/bin/chkrootkit
-
-    echo "chkrootkit 安裝完成！"
-    
-    # 切換回穩定目錄
-    cd /tmp 2>/dev/null || cd / 2>/dev/null || true
+    if ! sudo curl -L -o chkrootkit.zip https://github.com/Magentron/chkrootkit/archive/refs/heads/master.zip; then
+        echo "❌ chkrootkit 下載失敗，跳過安裝"
+        cd /tmp 2>/dev/null || cd / 2>/dev/null || true
+    elif ! sudo unzip -oq chkrootkit.zip 2>/dev/null; then
+        echo "❌ chkrootkit 解壓縮失敗，跳過安裝"
+        cd /tmp 2>/dev/null || cd / 2>/dev/null || true
+    elif [ ! -d "chkrootkit-master" ]; then
+        echo "❌ 找不到 chkrootkit-master 目錄，跳過安裝"
+        cd /tmp 2>/dev/null || cd / 2>/dev/null || true
+    else
+        cd chkrootkit-master || {
+            echo "❌ 無法進入 chkrootkit-master 目錄，跳過安裝"
+            cd /tmp 2>/dev/null || cd / 2>/dev/null || true
+        }
+        
+        if [ -d "$(pwd)" ]; then
+            echo "編譯..."
+            if sudo make sense 2>/dev/null; then
+                echo "安裝到 /usr/local/bin..."
+                # 複製檔案而不是創建符號連結，避免源目錄被刪除後連結失效
+                sudo cp -f "$(pwd)/chkrootkit" /usr/local/bin/chkrootkit
+                sudo chmod +x /usr/local/bin/chkrootkit
+                echo "chkrootkit 安裝完成！"
+            else
+                echo "❌ chkrootkit 編譯失敗，跳過安裝"
+            fi
+        fi
+        
+        # 切換回穩定目錄
+        cd /tmp 2>/dev/null || cd / 2>/dev/null || true
+    fi
 }
 
 #########################################
@@ -186,9 +203,10 @@ echo "下載 Lynis v3.1.6..."
 WORK_DIR="/tmp"
 cd "$WORK_DIR" || cd /tmp
 
-curl -sL "https://cisofy.com/files/lynis-3.1.6.tar.gz" -o lynis.tar.gz
-
-if file lynis.tar.gz | grep -q 'gzip compressed'; then
+if ! curl -sL "https://cisofy.com/files/lynis-3.1.6.tar.gz" -o lynis.tar.gz; then
+    echo "❌ Lynis 下載失敗，跳過安裝"
+    cd /tmp 2>/dev/null || cd / 2>/dev/null || true
+elif file lynis.tar.gz 2>/dev/null | grep -q 'gzip compressed'; then
     tar xzf lynis.tar.gz
     DIR=$(tar tzf lynis.tar.gz | head -1 | cut -f1 -d"/")  # 取得解壓後的第一個目錄
 
@@ -214,14 +232,21 @@ if [ ! -d /usr/local/maldetect ]; then
     WORK_DIR="/tmp"
     cd "$WORK_DIR" || cd /tmp
     
-    curl -s https://www.rfxn.com/downloads/maldetect-current.tar.gz -o maldetect.tar.gz
-    tar xzf maldetect.tar.gz
-    
-    # 找到解壓後的目錄
-    MALDET_DIR=$(find . -maxdepth 1 -type d -name "maldetect-*" | head -1)
-    if [ -n "$MALDET_DIR" ] && [ -d "$MALDET_DIR" ]; then
-        cd "$MALDET_DIR" || cd /tmp
-        bash install.sh
+    if curl -s https://www.rfxn.com/downloads/maldetect-current.tar.gz -o maldetect.tar.gz; then
+        if tar xzf maldetect.tar.gz 2>/dev/null; then
+            # 找到解壓後的目錄
+            MALDET_DIR=$(find . -maxdepth 1 -type d -name "maldetect-*" | head -1)
+            if [ -n "$MALDET_DIR" ] && [ -d "$MALDET_DIR" ]; then
+                cd "$MALDET_DIR" || cd /tmp
+                bash install.sh || echo "⚠️ Maldet 安裝失敗，繼續執行..."
+            else
+                echo "⚠️ 找不到 maldetect 目錄，跳過安裝"
+            fi
+        else
+            echo "⚠️ Maldet 解壓縮失敗，跳過安裝"
+        fi
+    else
+        echo "⚠️ Maldet 下載失敗，跳過安裝"
     fi
     
     # 切換回穩定目錄
@@ -342,13 +367,22 @@ declare -A WARNED_IPS
 
 while true; do
     # === Port Scan 偵測 ===
-    netstat -ntu 2>/dev/null | awk '{print $5}' | cut -d: -f1 | sort | uniq -c | sort -nr | while read count ip; do
+    # 使用 process substitution 避免子 shell 問題
+    while IFS= read -r line; do
+        count=$(echo "$line" | awk '{print $1}')
+        ip=$(echo "$line" | awk '{print $2}')
+        
+        # 跳過空行和無效 IP
+        [ -z "$ip" ] || [ -z "$count" ] && continue
+        
         # 跳過本機和 Docker 內網
         if [[ "$ip" =~ ^(127\.|0\.|::|172\.(1[6-9]|2[0-9]|3[0-1])\.|10\.|192\.168\.) ]]; then
             continue
         fi
         
-        if [ "$count" -gt $ALERT_THRESHOLD_PORTS ] && [ ! -z "$ip" ]; then
+        if [ "$count" -gt $ALERT_THRESHOLD_PORTS ] 2>/dev/null; then
+            # 初始化計數器（如果不存在）
+            [ -z "${PORT_SCAN_COUNT[$ip]}" ] && PORT_SCAN_COUNT[$ip]=0
             PORT_SCAN_COUNT[$ip]=$((PORT_SCAN_COUNT[$ip] + 1))
             
             # 只在第一次或每 5 次警告
@@ -358,7 +392,7 @@ while true; do
                 echo "[$(date)] Port scan from $ip ($count conns, total: ${PORT_SCAN_COUNT[$ip]})" >> "$LOG_FILE"
             fi
         fi
-    done
+    done < <(netstat -ntu 2>/dev/null | awk '{print $5}' | cut -d: -f1 | sort | uniq -c | sort -nr | awk '{print $1, $2}')
 
     sleep $CHECK_INTERVAL
 done
