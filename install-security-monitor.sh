@@ -1147,10 +1147,11 @@ if ! [[ "$SECURITY_UPDATES" =~ ^[0-9]+$ ]]; then SECURITY_UPDATES=0; fi
 if ! [[ "$FILE_CHANGES_COUNT" =~ ^[0-9]+$ ]]; then FILE_CHANGES_COUNT=0; fi
 
 ALERT_LEVEL="🟢 正常"
-if [ "$BANNED_COUNT" -gt 5 ] || [ "$INFECTED_COUNT" -gt 0 ] || [ "$ROOTKIT_WARNINGS" -gt 0 ] || [ "$DISK_USAGE" -gt 85 ] || [ "$SENSITIVE_COUNT" -gt 0 ]; then
+# 嚴重警告：病毒、Rootkit、大量封鎖 IP、磁碟空間不足
+if [ "$BANNED_COUNT" -gt 5 ] || [ "$INFECTED_COUNT" -gt 0 ] || [ "$ROOTKIT_WARNINGS" -gt 0 ] || [ "$DISK_USAGE" -gt 85 ]; then
     ALERT_LEVEL="🔴 需要關注"
-fi
-if [ "$BANNED_COUNT" -gt 2 ] || [ "$FAILED_LOGIN" -gt 10 ] || [ "$DISK_USAGE" -gt 70 ]; then
+# 輕微警告：少量封鎖 IP、登入失敗較多、磁碟使用率較高、少量敏感檔案變動（可能是正常維護）
+elif [ "$BANNED_COUNT" -gt 2 ] || [ "$FAILED_LOGIN" -gt 10 ] || [ "$DISK_USAGE" -gt 70 ] || [ "$SENSITIVE_COUNT" -gt 0 ]; then
     ALERT_LEVEL="🟡 輕微警告"
 fi
 
