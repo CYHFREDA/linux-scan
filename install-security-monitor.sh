@@ -136,6 +136,33 @@ chmod 1777 /var/lib/clamav/tmp 2>/dev/null || chmod 777 /var/lib/clamav/tmp 2>/d
 chmod 755 /var/lib/clamav
 chmod 755 /var/lib/clamav/tmp 2>/dev/null || true
 
+# 檢查並修復 freshclam.conf 配置
+if [ ! -f /etc/freshclam.conf ]; then
+    # 如果配置文件不存在，從模板創建
+    if [ -f /etc/freshclam.conf.sample ]; then
+        cp /etc/freshclam.conf.sample /etc/freshclam.conf
+    else
+        # 創建基本配置
+        cat > /etc/freshclam.conf << 'FRESHCLAM_EOF'
+# ClamAV 病毒庫更新配置
+DatabaseDirectory /var/lib/clamav
+UpdateLogFile /var/log/freshclam.log
+LogTime yes
+LogRotate yes
+DatabaseOwner clamupdate
+AllowSupplementaryGroups yes
+FRESHCLAM_EOF
+    fi
+fi
+
+# 確保配置文件格式正確（移除 Example 註釋）
+sed -i 's/^Example/#Example/' /etc/freshclam.conf 2>/dev/null || true
+sed -i 's/^#Example/#Example/' /etc/freshclam.conf 2>/dev/null || true
+
+# 設置配置文件權限
+chown root:root /etc/freshclam.conf
+chmod 644 /etc/freshclam.conf
+
 # 更新病毒庫
 # 設置環境變數讓 freshclam 使用系統臨時目錄，避免權限問題
 export TMPDIR=/tmp
@@ -216,16 +243,25 @@ sudo dnf install chkrootkit -y || {
                     
                     # 檢查目標文件是否存在（可能是符號連結或普通文件）
                     if [ -e "/usr/local/bin/chkrootkit" ]; then
-                        TARGET_ABS=$(readlink -f /usr/local/bin/chkrootkit 2>/dev/null || realpath /usr/local/bin/chkrootkit 2>/dev/null || echo "/usr/local/bin/chkrootkit")
-                        # 如果源文件和目標文件是同一個文件，跳過複製
-                        if [ "$SOURCE_ABS" = "$TARGET_ABS" ]; then
-                            echo "⚠️ chkrootkit 已存在於目標位置（可能是符號連結），跳過複製"
-                        else
-                            # 先刪除現有文件，然後複製
+                        # 如果是符號連結，必須替換為實際文件（避免源目錄被刪除後連結失效）
+                        if [ -L "/usr/local/bin/chkrootkit" ]; then
+                            echo "檢測到符號連結，替換為實際文件..."
                             sudo rm -f /usr/local/bin/chkrootkit
                             sudo cp -f "$SOURCE_FILE" /usr/local/bin/chkrootkit
                             sudo chmod +x /usr/local/bin/chkrootkit
-                            echo "chkrootkit 安裝完成！"
+                            echo "chkrootkit 安裝完成！（已替換符號連結）"
+                        else
+                            # 是普通文件，檢查是否相同
+                            TARGET_ABS=$(readlink -f /usr/local/bin/chkrootkit 2>/dev/null || realpath /usr/local/bin/chkrootkit 2>/dev/null || echo "/usr/local/bin/chkrootkit")
+                            if [ "$SOURCE_ABS" = "$TARGET_ABS" ]; then
+                                echo "⚠️ chkrootkit 已存在於目標位置，跳過複製"
+                            else
+                                # 先刪除現有文件，然後複製
+                                sudo rm -f /usr/local/bin/chkrootkit
+                                sudo cp -f "$SOURCE_FILE" /usr/local/bin/chkrootkit
+                                sudo chmod +x /usr/local/bin/chkrootkit
+                                echo "chkrootkit 安裝完成！"
+                            fi
                         fi
                     else
                         # 目標文件不存在，直接複製
@@ -1171,6 +1207,16 @@ rm -f /tmp/maldetect.tar.gz
 
 # 刪除解壓縮後的暫存目錄（只保留最終安裝目錄）
 # 注意：chkrootkit 已複製到 /usr/local/bin，可以安全刪除源目錄
+# 但先檢查是否有符號連結指向此目錄，如果有則先替換為實際文件
+if [ -L "/usr/local/bin/chkrootkit" ]; then
+    LINK_TARGET=$(readlink -f /usr/local/bin/chkrootkit 2>/dev/null)
+    if [[ "$LINK_TARGET" == *"chkrootkit-master"* ]] && [ -f "$LINK_TARGET" ]; then
+        echo "檢測到 chkrootkit 符號連結，替換為實際文件..."
+        sudo cp -f "$LINK_TARGET" /usr/local/bin/chkrootkit
+        sudo chmod +x /usr/local/bin/chkrootkit
+        echo "chkrootkit 符號連結已替換為實際文件"
+    fi
+fi
 rm -rf /opt/security/tools/chkrootkit-master
 rm -rf /tmp/maldetect-*
 
