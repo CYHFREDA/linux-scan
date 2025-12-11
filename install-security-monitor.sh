@@ -84,6 +84,16 @@ if [ "$TEXT_LENGTH" -gt 4096 ]; then
     TEXT="${TEXT}..."
 fi
 
+# 轉義 HTML 特殊字元（在 <code> 標籤內）
+# Telegram 的 HTML 解析器對 <code> 標籤很嚴格，需要確保所有標籤都正確關閉
+# 先檢查是否有未關閉的 <code> 標籤
+OPEN_TAGS=$(echo "$TEXT" | grep -o '<code>' | wc -l)
+CLOSE_TAGS=$(echo "$TEXT" | grep -o '</code>' | wc -l)
+if [ "$OPEN_TAGS" -ne "$CLOSE_TAGS" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 警告: <code> 標籤數量不匹配 (開啟: $OPEN_TAGS, 關閉: $CLOSE_TAGS)" >> "$LOG_FILE" 2>&1
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 訊息內容預覽: ${TEXT:0:200}..." >> "$LOG_FILE" 2>&1
+fi
+
 # 發送訊息並檢查結果
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
      -d chat_id="${TG_CHAT_ID}" \
@@ -1077,7 +1087,7 @@ if [ "$SENSITIVE_COUNT" -gt 0 ]; then
     # 格式化檔案列表
     SENSITIVE_LIST=$(echo "$SENSITIVE_CHANGES" | tr '\n' ' ' | sed 's/ $//')
     MSG="$MSG%0A$SENSITIVE_LIST"
-    MSG="$MSG%0A💡 檢查指令: <code>ls -la /etc/passwd /etc/shadow && stat /etc/passwd /etc/shadow</code>"
+    MSG="$MSG%0A💡 檢查指令: <code>ls -la /etc/passwd /etc/shadow</code>"
     MSG="$MSG%0Aℹ️ 可能是正常維護（用戶管理、權限調整等），請確認是否為預期操作"
 fi
 
@@ -1379,13 +1389,13 @@ MSG="$MSG%0A%0A狀態: $ALERT_LEVEL"
 if [ "$INFECTED_COUNT" -gt 0 ]; then
     MSG="$MSG%0A%0A⚠️ <b>發現病毒威脅！</b>"
     MSG="$MSG%0A📄 日誌: /opt/security/logs/clamav-deep-*.log"
-    MSG="$MSG%0A🔍 快速查看: <code>grep -i 'FOUND' /opt/security/logs/clamav-deep-$(date +%Y%m%d)*.log | head -20</code>"
+    MSG="$MSG%0A🔍 快速查看: <code>grep -i FOUND /opt/security/logs/clamav-deep-$(date +%Y%m%d)*.log</code>"
 fi
 
 if [ "$ROOTKIT_WARNINGS" -gt 0 ]; then
     MSG="$MSG%0A%0A⚠️ <b>Rootkit 警告！</b>"
     MSG="$MSG%0A📄 日誌: /opt/security/logs/chkrootkit-deep-*.log"
-    MSG="$MSG%0A🔍 快速查看: <code>grep -iE 'INFECTED|ROOTKIT|suspicious' /opt/security/logs/chkrootkit-deep-$(date +%Y%m%d).log</code>"
+    MSG="$MSG%0A🔍 快速查看: <code>grep -i INFECTED /opt/security/logs/chkrootkit-deep-$(date +%Y%m%d).log</code>"
 fi
 
 if [ "$MALWARE_FOUND" -gt 0 ]; then
