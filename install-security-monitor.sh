@@ -222,58 +222,65 @@ freshclam || true
 cat > /opt/security/scripts/reverse-shell-detector.sh << 'EOF'
 #!/bin/bash
 LOG="/opt/security/logs/reverse-shell.log"
+CHECK_INTERVAL=60  # 每 60 秒檢查一次
 
-# 獲取所有網路連接
-ALL_CONNS=$(ss -tunap 2>/dev/null || true)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Reverse Shell Detector Started (每 ${CHECK_INTERVAL}s 檢查)" >> "$LOG"
 
-# 排除正常的 SSH 連接（sshd）和本地連接
-# 只檢測可疑的連接模式：
-# 1. 使用 nc/ncat 的連接（可能是 reverse shell）
-# 2. 使用 perl/python 連接到外部 IP（排除本地）
-# 3. bash/sh 連接到非標準端口的外部 IP
+while true; do
+    # 獲取所有網路連接
+    ALL_CONNS=$(ss -tunap 2>/dev/null || true)
 
-SUSPICIOUS=$(echo "$ALL_CONNS" | grep -v "sshd" | grep -v "127.0.0.1" | grep -v "::1" | \
-    grep -E "(nc |ncat |netcat )" || true)
+    # 排除正常的 SSH 連接（sshd）和本地連接
+    # 只檢測可疑的連接模式：
+    # 1. 使用 nc/ncat 的連接（可能是 reverse shell）
+    # 2. 使用 perl/python 連接到外部 IP（排除本地）
+    # 3. bash/sh 連接到非標準端口的外部 IP
 
-# 檢測 perl/python 連接到外部 IP（排除本地和常見服務端口）
-PERL_PYTHON=$(echo "$ALL_CONNS" | grep -v "sshd" | grep -v "127.0.0.1" | grep -v "::1" | \
-    grep -E "(perl|python)" | grep -vE ":(22|80|443|3306|5432|6379|8080|8443) " || true)
+    SUSPICIOUS=$(echo "$ALL_CONNS" | grep -v "sshd" | grep -v "127.0.0.1" | grep -v "::1" | \
+        grep -E "(nc |ncat |netcat )" || true)
 
-# 檢測 bash/sh 連接到可疑的外部 IP 和端口
-BASH_SUSPICIOUS=$(echo "$ALL_CONNS" | grep -v "sshd" | grep -v "127.0.0.1" | grep -v "::1" | \
-    grep -E "(bash|sh)" | grep -vE ":(22|80|443|3306|5432|6379|8080|8443) " | \
-    grep -vE "^192\.168\.|^10\.|^172\.(1[6-9]|2[0-9]|3[0-1])\." || true)
+    # 檢測 perl/python 連接到外部 IP（排除本地和常見服務端口）
+    PERL_PYTHON=$(echo "$ALL_CONNS" | grep -v "sshd" | grep -v "127.0.0.1" | grep -v "::1" | \
+        grep -E "(perl|python)" | grep -vE ":(22|80|443|3306|5432|6379|8080|8443) " || true)
 
-# 合併所有可疑連接
-OUTPUT=""
-if [ -n "$SUSPICIOUS" ]; then
-    OUTPUT="${OUTPUT}${SUSPICIOUS}\n"
-fi
-if [ -n "$PERL_PYTHON" ]; then
-    OUTPUT="${OUTPUT}${PERL_PYTHON}\n"
-fi
-if [ -n "$BASH_SUSPICIOUS" ]; then
-    OUTPUT="${OUTPUT}${BASH_SUSPICIOUS}\n"
-fi
+    # 檢測 bash/sh 連接到可疑的外部 IP 和端口
+    BASH_SUSPICIOUS=$(echo "$ALL_CONNS" | grep -v "sshd" | grep -v "127.0.0.1" | grep -v "::1" | \
+        grep -E "(bash|sh)" | grep -vE ":(22|80|443|3306|5432|6379|8080|8443) " | \
+        grep -vE "^192\.168\.|^10\.|^172\.(1[6-9]|2[0-9]|3[0-1])\." || true)
 
-# 如果有可疑連接，記錄並發送通知
-if [ -n "$OUTPUT" ]; then
-    # 去重並格式化
-    OUTPUT=$(echo -e "$OUTPUT" | sort -u | grep -v "^$")
-    
-    if [ -n "$OUTPUT" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Reverse Shell Detected:" >> "$LOG"
-        echo "$OUTPUT" >> "$LOG"
-        echo "---" >> "$LOG"
-        
-        # 限制輸出長度，避免訊息過長
-        OUTPUT_SHORT=$(echo "$OUTPUT" | head -n 10)
-        MSG="🔴 <b>Reverse Shell 偵測</b>%0A<pre>${OUTPUT_SHORT}</pre>"
-        [ $(echo "$OUTPUT" | wc -l) -gt 10 ] && MSG="${MSG}%0A<i>（還有更多連接，請查看日誌）</i>"
-        
-        /opt/security/scripts/send-telegram.sh "$MSG"
+    # 合併所有可疑連接
+    OUTPUT=""
+    if [ -n "$SUSPICIOUS" ]; then
+        OUTPUT="${OUTPUT}${SUSPICIOUS}\n"
     fi
-fi
+    if [ -n "$PERL_PYTHON" ]; then
+        OUTPUT="${OUTPUT}${PERL_PYTHON}\n"
+    fi
+    if [ -n "$BASH_SUSPICIOUS" ]; then
+        OUTPUT="${OUTPUT}${BASH_SUSPICIOUS}\n"
+    fi
+
+    # 如果有可疑連接，記錄並發送通知
+    if [ -n "$OUTPUT" ]; then
+        # 去重並格式化
+        OUTPUT=$(echo -e "$OUTPUT" | sort -u | grep -v "^$")
+        
+        if [ -n "$OUTPUT" ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Reverse Shell Detected:" >> "$LOG"
+            echo "$OUTPUT" >> "$LOG"
+            echo "---" >> "$LOG"
+            
+            # 限制輸出長度，避免訊息過長
+            OUTPUT_SHORT=$(echo "$OUTPUT" | head -n 10)
+            MSG="🔴 <b>Reverse Shell 偵測</b>%0A<pre>${OUTPUT_SHORT}</pre>"
+            [ $(echo "$OUTPUT" | wc -l) -gt 10 ] && MSG="${MSG}%0A<i>（還有更多連接，請查看日誌）</i>"
+            
+            /opt/security/scripts/send-telegram.sh "$MSG"
+        fi
+    fi
+
+    sleep $CHECK_INTERVAL
+done
 EOF
 
 # ==== Process Monitor ====
