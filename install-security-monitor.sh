@@ -76,6 +76,14 @@ if [ -z "$TEXT" ]; then
     exit 1
 fi
 
+# Telegram 訊息長度限制為 4096 字元
+TEXT_LENGTH=$(echo -n "$TEXT" | wc -c)
+if [ "$TEXT_LENGTH" -gt 4096 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 訊息過長 ($TEXT_LENGTH 字元)，截斷至 4096 字元" >> "$LOG_FILE" 2>&1
+    TEXT=$(echo -n "$TEXT" | head -c 4093)
+    TEXT="${TEXT}..."
+fi
+
 # 發送訊息並檢查結果
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
      -d chat_id="${TG_CHAT_ID}" \
@@ -85,9 +93,17 @@ RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TG
 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
 BODY=$(echo "$RESPONSE" | sed '$d')
 
+# 檢查 HTTP 狀態碼和 API 回應
 if [ "$HTTP_CODE" = "200" ]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Telegram 訊息發送成功" >> "$LOG_FILE" 2>&1
-    exit 0
+    # 即使 HTTP 200，也要檢查 API 回應是否成功
+    if echo "$BODY" | grep -q '"ok":true'; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Telegram 訊息發送成功 (長度: $TEXT_LENGTH 字元)" >> "$LOG_FILE" 2>&1
+        exit 0
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Telegram API 回應失敗 (HTTP 200 但 API 返回錯誤)" >> "$LOG_FILE" 2>&1
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 回應: $BODY" >> "$LOG_FILE" 2>&1
+        exit 1
+    fi
 else
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Telegram 訊息發送失敗 (HTTP $HTTP_CODE)" >> "$LOG_FILE" 2>&1
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 回應: $BODY" >> "$LOG_FILE" 2>&1
@@ -980,7 +996,7 @@ MSG="$MSG%0A├ 敏感檔案變動: $SENSITIVE_COUNT"
 # Audit 異常說明：只統計可疑操作（寫入/刪除/權限變更），不包括正常讀取
 if [ "$AUDIT_EVENTS" -gt 0 ]; then
     MSG="$MSG%0A└ ⚠️ Audit 可疑操作: $AUDIT_EVENTS"
-    MSG="$MSG%0A%0A🔍 快速查看: <code>grep -A 20 '⚠️ 可疑操作' /opt/security/logs/daily-report-$(date +%Y%m%d).txt</code>"
+    MSG="$MSG%0A%0A🔍 快速查看: <code>grep -A 20 '可疑操作' /opt/security/logs/daily-report-$(date +%Y%m%d).txt</code>"
 else
     MSG="$MSG%0A└ Audit 可疑操作: 0"
 fi
@@ -1066,17 +1082,22 @@ if [ "$SENSITIVE_COUNT" -gt 0 ]; then
 fi
 
 MSG="$MSG%0A%0A📄 詳細報告: /opt/security/logs/daily-report-$(date +%Y%m%d).txt"
-MSG="$MSG%0A🔍 快速查看: <code>grep -A 20 '⚠️ 可疑操作\|chkrootkit 可疑警告' /opt/security/logs/daily-report-$(date +%Y%m%d).txt</code>"
+MSG="$MSG%0A🔍 快速查看: <code>grep -A 20 '可疑操作' /opt/security/logs/daily-report-$(date +%Y%m%d).txt</code>"
 
 # 發送 Telegram
 log_and_echo "[$(date '+%H:%M:%S')] 📱 發送 Telegram 通知..."
-if /opt/security/scripts/send-telegram.sh "$MSG" 2>&1 | tee -a "$REPORT_FILE"; then
+TELEGRAM_OUTPUT=$(/opt/security/scripts/send-telegram.sh "$MSG" 2>&1)
+TELEGRAM_EXIT=$?
+echo "$TELEGRAM_OUTPUT" | tee -a "$REPORT_FILE"
+
+if [ $TELEGRAM_EXIT -eq 0 ]; then
     log_and_echo "  ✅ Telegram 通知發送成功"
 else
     log_and_echo "  ❌ Telegram 通知發送失敗，請檢查:"
     log_and_echo "     - 配置檔案: /opt/security/config/telegram.token"
     log_and_echo "     - 日誌檔案: /opt/security/logs/telegram.log"
     log_and_echo "     - 手動測試: /opt/security/scripts/send-telegram.sh '測試訊息'"
+    log_and_echo "     - 錯誤詳情: $TELEGRAM_OUTPUT"
 fi
 
 # ===== 清理 30 天前日誌 =====
