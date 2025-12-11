@@ -407,19 +407,33 @@ systemctl enable --now reverse-shell-detector process-monitor network-monitor fi
 #########################################
 sudo tee /etc/cron.daily/security-check > /dev/null << 'EOFF'
 #!/bin/bash
-set -e
+# 不使用 set -e，允許部分檢查失敗但不影響整體
 
-# ===== 暫停高 CPU 偵測 =====
-systemctl stop process-monitor
+# 同時輸出到終端和日誌
+log_and_echo() {
+    echo "$1" | tee -a "$REPORT_FILE"
+}
 
 REPORT_FILE="/opt/security/logs/daily-report-$(date +%Y%m%d).txt"
 echo "=== Daily Security Report - $(date) ===" > "$REPORT_FILE"
 
+log_and_echo ""
+log_and_echo "==========================================="
+log_and_echo "📊 開始每日安全檢查 - $(date '+%Y-%m-%d %H:%M:%S')"
+log_and_echo "==========================================="
+log_and_echo ""
+
+# ===== 暫停高 CPU 偵測 =====
+log_and_echo "[$(date '+%H:%M:%S')] 暫停 process-monitor 服務..."
+systemctl stop process-monitor 2>/dev/null || true
+
 # ===== Fail2ban 統計 =====
+log_and_echo "[$(date '+%H:%M:%S')] 📊 檢查 Fail2ban 狀態..."
 BANNED_COUNT=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $4}' || echo 0)
 TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $4}' || echo 0)
 echo "=== Fail2ban 封鎖統計 ===" >> "$REPORT_FILE"
 fail2ban-client status sshd >> "$REPORT_FILE" 2>&1 || echo "Fail2ban 未啟動" >> "$REPORT_FILE"
+log_and_echo "  ✅ 當前封鎖: $BANNED_COUNT, 總計: $TOTAL_BANNED"
 
 # ===== Audit 事件摘要 =====
 echo "=== 今日 Audit 事件摘要 ===" >> "$REPORT_FILE"
@@ -499,6 +513,7 @@ FAILED_LOGIN=$(grep "$(date +%b\ %e)" /var/log/secure 2>/dev/null | grep -i "fai
 grep "$(date +%b\ %e)" /var/log/secure >> "$REPORT_FILE" 2>&1 || echo "無事件" >> "$REPORT_FILE"
 
 # ===== ClamAV 輕量掃描 =====
+log_and_echo "[$(date '+%H:%M:%S')] 🦠 開始 ClamAV 病毒掃描..."
 CLAMAV_DIRS=(/home /root /opt /var/www /srv/data /data /backup)
 CLAMAV_LOG="/opt/security/logs/clamav-daily-$(date +%Y%m%d).log"
 
@@ -509,7 +524,7 @@ chmod 755 /var/lib/clamav 2>/dev/null || true
 chmod 1777 /var/lib/clamav/tmp 2>/dev/null || chmod 777 /var/lib/clamav/tmp 2>/dev/null || true
 
 # 更新病毒庫（使用系統臨時目錄避免權限問題）
-# 設置環境變數讓 freshclam 使用系統臨時目錄
+log_and_echo "  🔄 更新病毒庫..."
 export TMPDIR=/tmp
 export TMP=/tmp
 # 嘗試更新，抑制權限相關錯誤（不影響掃描功能）
@@ -518,14 +533,20 @@ FRESHCLAM_SUCCESS=$(echo "$FRESHCLAM_OUTPUT" | grep -E "updated|up-to-date" || e
 if [ -n "$FRESHCLAM_SUCCESS" ]; then
     echo "✅ ClamAV 病毒庫更新成功" >> "$REPORT_FILE"
     echo "$FRESHCLAM_SUCCESS" >> "$REPORT_FILE"
+    log_and_echo "  ✅ 病毒庫已更新"
 else
     # 只記錄到報告，不顯示錯誤（權限問題不影響掃描）
     echo "⚠️ ClamAV 更新跳過（權限限制，使用現有病毒庫，不影響掃描功能）" >> "$REPORT_FILE"
+    log_and_echo "  ⚠️ 使用現有病毒庫"
 fi
 
+log_and_echo "  📁 掃描目錄..."
 INFECTED_COUNT=0
+SCANNED_DIRS=0
 for dir in "${CLAMAV_DIRS[@]}"; do
     [ -d "$dir" ] || continue
+    SCANNED_DIRS=$((SCANNED_DIRS + 1))
+    log_and_echo "    - $dir"
     SCAN_RESULT=$(nice -n 19 ionice -c3 clamdscan --fdpass --multiscan --infected --quiet "$dir" 2>&1 || true)
     echo "$SCAN_RESULT" >> "$CLAMAV_LOG"
     # 安全地計算感染數量，確保是數字
@@ -536,16 +557,21 @@ for dir in "${CLAMAV_DIRS[@]}"; do
     fi
     INFECTED_COUNT=$((INFECTED_COUNT + FOUND_COUNT))
 done
+log_and_echo "  ✅ ClamAV 掃描完成 - 掃描 $SCANNED_DIRS 個目錄，發現: $INFECTED_COUNT"
 
 # ===== chkrootkit 掃描 =====
+log_and_echo "[$(date '+%H:%M:%S')] 🔍 開始 chkrootkit Rootkit 掃描..."
 CHKROOTKIT_LOG="/opt/security/logs/chkrootkit-$(date +%Y%m%d).log"
-chkrootkit > $CHKROOTKIT_LOG 2>&1
+chkrootkit > $CHKROOTKIT_LOG 2>&1 || true
 ROOTKIT_WARNINGS=$(grep -i "warning\|infected" $CHKROOTKIT_LOG | wc -l || echo 0)
+log_and_echo "  ✅ chkrootkit 掃描完成 - 警告: $ROOTKIT_WARNINGS"
 
 # ===== LMD 掃描 =====
+log_and_echo "[$(date '+%H:%M:%S')] 🦠 開始 Maldet 惡意軟體掃描..."
 MALDET_LOG="/opt/security/logs/maldet-$(date +%Y%m%d).log"
 maldet -a /home /var/www > $MALDET_LOG 2>&1 || true
 MALWARE_FOUND=$(grep -i "malware detected" $MALDET_LOG | wc -l || echo 0)
+log_and_echo "  ✅ Maldet 掃描完成 - 發現: $MALWARE_FOUND"
 
 # ===== Lynis 每週掃描 (週日) =====
 LYNIS_MSG=""
@@ -629,9 +655,15 @@ find /opt/security/logs -name "clamav-daily-*.log" -mtime +30 -delete
 find /opt/security/logs -name "lynis-*.log" -mtime +30 -delete
 
 # ===== 恢復 process-monitor =====
-systemctl start process-monitor
+log_and_echo "[$(date '+%H:%M:%S')] 恢復 process-monitor 服務..."
+systemctl start process-monitor 2>/dev/null || true
 
-echo "每日檢查完成 - 報告已發送至 Telegram"
+log_and_echo ""
+log_and_echo "==========================================="
+log_and_echo "✅ 每日檢查完成！"
+log_and_echo "📄 報告: $REPORT_FILE"
+log_and_echo "📱 報告已發送至 Telegram"
+log_and_echo "==========================================="
 EOFF
 
 #########################################
@@ -658,29 +690,63 @@ log_and_echo ""
 # ===== Lynis 掃描 =====
 log_and_echo "[$(date '+%H:%M:%S')] 📋 步驟 1/5: 開始 Lynis 系統審計掃描..."
 LYNIS_LOG="/opt/security/logs/lynis-deep-$(date +%Y%m%d).log"
-if nice -n 19 ionice -c3 /opt/lynis/lynis audit system --quiet > $LYNIS_LOG 2>&1; then
-    LYNIS_WARNINGS=$(grep -c 'Warning:' $LYNIS_LOG 2>/dev/null || echo 0)
-    LYNIS_SUGGESTIONS=$(grep -c 'Suggestion:' $LYNIS_LOG 2>/dev/null || echo 0)
-    log_and_echo "  ✅ Lynis 掃描完成 - 警告: $LYNIS_WARNINGS, 建議: $LYNIS_SUGGESTIONS"
-else
+
+# 檢查 Lynis 是否安裝
+if [ ! -f "/opt/lynis/lynis" ]; then
+    log_and_echo "  ❌ Lynis 未安裝（/opt/lynis/lynis 不存在）"
     LYNIS_WARNINGS=0
     LYNIS_SUGGESTIONS=0
-    log_and_echo "  ⚠️ Lynis 掃描失敗，繼續執行..."
+else
+    # 執行掃描（不依賴退出碼，因為 Lynis 發現問題時會返回非零）
+    nice -n 19 ionice -c3 /opt/lynis/lynis audit system --quiet > $LYNIS_LOG 2>&1 || true
+    
+    # 檢查日誌文件是否存在且有內容
+    if [ -f "$LYNIS_LOG" ] && [ -s "$LYNIS_LOG" ]; then
+        LYNIS_WARNINGS=$(grep -c 'Warning:' $LYNIS_LOG 2>/dev/null || echo 0)
+        LYNIS_SUGGESTIONS=$(grep -c 'Suggestion:' $LYNIS_LOG 2>/dev/null || echo 0)
+        log_and_echo "  ✅ Lynis 掃描完成 - 警告: $LYNIS_WARNINGS, 建議: $LYNIS_SUGGESTIONS"
+    else
+        LYNIS_WARNINGS=0
+        LYNIS_SUGGESTIONS=0
+        log_and_echo "  ⚠️ Lynis 掃描失敗（日誌文件未生成或為空）"
+        log_and_echo "    檢查日誌: $LYNIS_LOG"
+        # 顯示錯誤訊息（如果有）
+        if [ -f "$LYNIS_LOG" ]; then
+            log_and_echo "    錯誤: $(head -n 5 $LYNIS_LOG 2>/dev/null | tr '\n' ' ')"
+        fi
+    fi
+    cat $LYNIS_LOG >> $LOG 2>/dev/null || true
 fi
-cat $LYNIS_LOG >> $LOG
 log_and_echo ""
 
 # ===== chkrootkit 掃描 =====
 log_and_echo "[$(date '+%H:%M:%S')] 🔍 步驟 2/5: 開始 chkrootkit Rootkit 掃描..."
 CHKROOTKIT_LOG="/opt/security/logs/chkrootkit-deep-$(date +%Y%m%d).log"
-if nice -n 19 ionice -c3 chkrootkit > $CHKROOTKIT_LOG 2>&1; then
-    ROOTKIT_WARNINGS=$(grep -iE "warning|infected|suspicious" $CHKROOTKIT_LOG | wc -l || echo 0)
-    log_and_echo "  ✅ chkrootkit 掃描完成 - 警告: $ROOTKIT_WARNINGS"
-else
+
+# 檢查 chkrootkit 是否安裝
+if ! command -v chkrootkit >/dev/null 2>&1; then
+    log_and_echo "  ❌ chkrootkit 未安裝或不在 PATH 中"
+    log_and_echo "    嘗試查找: $(which chkrootkit 2>/dev/null || echo '未找到')"
     ROOTKIT_WARNINGS=0
-    log_and_echo "  ⚠️ chkrootkit 掃描失敗，繼續執行..."
+else
+    # 執行掃描（不依賴退出碼，因為 chkrootkit 發現問題時會返回非零）
+    nice -n 19 ionice -c3 chkrootkit > $CHKROOTKIT_LOG 2>&1 || true
+    
+    # 檢查日誌文件是否存在且有內容
+    if [ -f "$CHKROOTKIT_LOG" ] && [ -s "$CHKROOTKIT_LOG" ]; then
+        ROOTKIT_WARNINGS=$(grep -iE "warning|infected|suspicious" $CHKROOTKIT_LOG | wc -l || echo 0)
+        log_and_echo "  ✅ chkrootkit 掃描完成 - 警告: $ROOTKIT_WARNINGS"
+    else
+        ROOTKIT_WARNINGS=0
+        log_and_echo "  ⚠️ chkrootkit 掃描失敗（日誌文件未生成或為空）"
+        log_and_echo "    檢查日誌: $CHKROOTKIT_LOG"
+        # 顯示錯誤訊息（如果有）
+        if [ -f "$CHKROOTKIT_LOG" ]; then
+            log_and_echo "    錯誤: $(head -n 5 $CHKROOTKIT_LOG 2>/dev/null | tr '\n' ' ')"
+        fi
+    fi
+    cat $CHKROOTKIT_LOG >> $LOG 2>/dev/null || true
 fi
-cat $CHKROOTKIT_LOG >> $LOG
 log_and_echo ""
 
 # ===== Maldet 更新 =====
@@ -702,9 +768,13 @@ log_and_echo ""
 
 # ===== ClamAV 掃描 =====
 log_and_echo "[$(date '+%H:%M:%S')] 🦠 步驟 4/5: 開始 ClamAV 病毒掃描（這可能需要較長時間）..."
+log_and_echo "  ℹ️ 掃描重點目錄：用戶數據、應用程式、網站目錄"
+log_and_echo "  ℹ️ 系統目錄（/usr, /bin, /sbin 等）通常不需要掃描（由套件管理器管理）"
 INFECTED_COUNT=0
 SCAN_DIRS=0
-for dir in /home /root /opt /var/www; do
+# 掃描重點目錄：用戶數據、應用程式、網站、暫存目錄
+# 可根據需要添加更多目錄，如：/tmp /var/tmp /srv /mnt 等
+for dir in /home /root /opt /var/www /tmp /var/tmp /srv/data /data /backup; do
     [ -d "$dir" ] || continue
     SCAN_DIRS=$((SCAN_DIRS + 1))
     log_and_echo "  📁 掃描目錄: $dir"
