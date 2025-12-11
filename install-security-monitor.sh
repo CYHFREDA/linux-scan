@@ -263,6 +263,87 @@ else
     echo "ClamAV 啟動失敗，請查看 systemctl status clamd@scan"
 fi
 
+#########################################
+# 配置並啟動 Fail2ban
+#########################################
+echo "== 配置 Fail2ban =="
+
+# 確保 Fail2ban 配置目錄存在
+mkdir -p /etc/fail2ban
+mkdir -p /etc/fail2ban/action.d
+
+# 檢查並修復有問題的 action 配置（如 telegram-notify）
+if [ -f /etc/fail2ban/action.d/telegram-notify.conf ]; then
+    echo "⚠️ 發現有問題的 telegram-notify action 配置，備份並移除..."
+    mv /etc/fail2ban/action.d/telegram-notify.conf /etc/fail2ban/action.d/telegram-notify.conf.bak 2>/dev/null || true
+fi
+
+# 檢查 jail.local 中是否引用了有問題的 action
+if [ -f /etc/fail2ban/jail.local ]; then
+    # 備份現有配置
+    cp /etc/fail2ban/jail.local /etc/fail2ban/jail.local.bak.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+    # 移除有問題的 telegram-notify action 引用
+    sed -i 's/action.*telegram-notify.*//g' /etc/fail2ban/jail.local 2>/dev/null || true
+    sed -i '/telegram-notify/d' /etc/fail2ban/jail.local 2>/dev/null || true
+fi
+
+# 如果沒有 jail.local 或配置被清空，創建基本配置
+if [ ! -f /etc/fail2ban/jail.local ] || [ ! -s /etc/fail2ban/jail.local ]; then
+    cat > /etc/fail2ban/jail.local << 'EOF'
+[DEFAULT]
+# 封鎖時間（秒），預設 10 分鐘
+bantime = 600
+# 檢測時間窗口（秒），預設 10 分鐘
+findtime = 600
+# 最大失敗次數
+maxretry = 5
+# 封鎖動作（使用標準動作）
+action = %(action_)s
+
+[sshd]
+enabled = true
+port = ssh
+logpath = %(sshd_log)s
+backend = %(sshd_backend)s
+maxretry = 5
+bantime = 3600
+EOF
+    echo "✅ 已創建 Fail2ban 基本配置"
+else
+    echo "✅ 使用現有 Fail2ban 配置（已修復可能的錯誤）"
+fi
+
+# 驗證配置語法
+if fail2ban-client -t 2>&1 | grep -q "Error\|ERROR"; then
+    echo "⚠️ Fail2ban 配置仍有錯誤，嘗試使用最小配置..."
+    cat > /etc/fail2ban/jail.local << 'EOF'
+[DEFAULT]
+bantime = 600
+findtime = 600
+maxretry = 5
+
+[sshd]
+enabled = true
+EOF
+fi
+
+# 啟動並啟用 Fail2ban
+systemctl enable fail2ban 2>/dev/null || true
+systemctl start fail2ban 2>/dev/null || true
+
+# 等待服務啟動
+sleep 3
+
+if systemctl is-active --quiet fail2ban; then
+    echo "✅ Fail2ban 啟動成功！"
+    # 顯示狀態
+    fail2ban-client status 2>/dev/null | head -5 || true
+else
+    echo "⚠️ Fail2ban 啟動失敗，請檢查：systemctl status fail2ban"
+    echo "   可能的原因：配置錯誤或服務衝突"
+    echo "   建議：檢查 /etc/fail2ban/jail.local 和 /etc/fail2ban/action.d/ 目錄"
+fi
+
 ######################################### 
 # 安裝 chkrootkit
 #########################################
@@ -639,24 +720,78 @@ log_and_echo "[$(date '+%H:%M:%S')] 📊 檢查 Fail2ban 狀態..."
 BANNED_COUNT=0
 TOTAL_BANNED=0
 
-# 檢查 fail2ban 是否運行
-if systemctl is-active --quiet fail2ban 2>/dev/null; then
-    # 獲取 fail2ban 狀態
-    F2B_STATUS=$(fail2ban-client status sshd 2>/dev/null || echo "")
-    
-    if [ -n "$F2B_STATUS" ]; then
-        # 嘗試多種方式解析（不同版本的 fail2ban 輸出格式可能不同）
-        # 方式1: "Currently banned: 0" 或 "Currently banned: 0 IPs"
-        BANNED_COUNT=$(echo "$F2B_STATUS" | grep -i "Currently banned" | grep -oE '[0-9]+' | head -1)
-        # 方式2: "Total banned: 0" 或 "Total banned: 0 IPs"
-        TOTAL_BANNED=$(echo "$F2B_STATUS" | grep -i "Total banned" | grep -oE '[0-9]+' | head -1)
+# 檢查 fail2ban 是否安裝
+if ! command -v fail2ban-client &>/dev/null; then
+    log_and_echo "  ⚠️ Fail2ban 未安裝，跳過檢查"
+    echo "Fail2ban 未安裝" >> "$REPORT_FILE"
+else
+    # 如果 fail2ban 未運行，嘗試修復配置並啟動
+    if ! systemctl is-active --quiet fail2ban 2>/dev/null; then
+        log_and_echo "  ⚠️ Fail2ban 未運行，嘗試修復配置並啟動..."
         
-        # 如果還是沒找到，嘗試其他格式
-        if [ -z "$BANNED_COUNT" ]; then
-            BANNED_COUNT=$(echo "$F2B_STATUS" | grep -iE "banned.*ip" | grep -oE '[0-9]+' | head -1)
+        # 檢查是否有問題的 action 配置
+        if [ -f /etc/fail2ban/action.d/telegram-notify.conf ]; then
+            log_and_echo "  🔧 發現有問題的 telegram-notify action，備份並移除..."
+            mv /etc/fail2ban/action.d/telegram-notify.conf /etc/fail2ban/action.d/telegram-notify.conf.bak 2>/dev/null || true
         fi
-        if [ -z "$TOTAL_BANNED" ]; then
-            TOTAL_BANNED=$(echo "$F2B_STATUS" | grep -iE "total.*banned" | grep -oE '[0-9]+' | head -1)
+        
+        # 檢查並修復 jail.local 中的問題配置
+        if [ -f /etc/fail2ban/jail.local ]; then
+            # 移除有問題的 telegram-notify action 引用
+            sed -i '/telegram-notify/d' /etc/fail2ban/jail.local 2>/dev/null || true
+            sed -i 's/action.*telegram-notify.*//g' /etc/fail2ban/jail.local 2>/dev/null || true
+        fi
+        
+        # 嘗試啟動
+        systemctl start fail2ban 2>/dev/null || true
+        sleep 2
+        
+        # 如果還是無法啟動，嘗試使用最小配置
+        if ! systemctl is-active --quiet fail2ban 2>/dev/null; then
+            log_and_echo "  🔧 嘗試使用最小配置..."
+            cat > /etc/fail2ban/jail.local << 'EOF'
+[DEFAULT]
+bantime = 600
+findtime = 600
+maxretry = 5
+
+[sshd]
+enabled = true
+EOF
+            systemctl restart fail2ban 2>/dev/null || true
+            sleep 2
+        fi
+        
+        # 如果還是無法啟動，啟用開機自動啟動（可能下次重啟後會自動啟動）
+        if ! systemctl is-active --quiet fail2ban 2>/dev/null; then
+            systemctl enable fail2ban 2>/dev/null || true
+            log_and_echo "  ⚠️ Fail2ban 啟動失敗，已啟用開機自動啟動"
+            log_and_echo "  💡 建議手動檢查：systemctl status fail2ban"
+            echo "Fail2ban 未啟動（已啟用開機自動啟動）" >> "$REPORT_FILE"
+        else
+            log_and_echo "  ✅ Fail2ban 已啟動"
+        fi
+    fi
+    
+    # 檢查 fail2ban 是否運行
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        # 獲取 fail2ban 狀態
+        F2B_STATUS=$(fail2ban-client status sshd 2>/dev/null || echo "")
+        
+        if [ -n "$F2B_STATUS" ]; then
+            # 嘗試多種方式解析（不同版本的 fail2ban 輸出格式可能不同）
+            # 方式1: "Currently banned: 0" 或 "Currently banned: 0 IPs"
+            BANNED_COUNT=$(echo "$F2B_STATUS" | grep -i "Currently banned" | grep -oE '[0-9]+' | head -1)
+            # 方式2: "Total banned: 0" 或 "Total banned: 0 IPs"
+            TOTAL_BANNED=$(echo "$F2B_STATUS" | grep -i "Total banned" | grep -oE '[0-9]+' | head -1)
+            
+            # 如果還是沒找到，嘗試其他格式
+            if [ -z "$BANNED_COUNT" ]; then
+                BANNED_COUNT=$(echo "$F2B_STATUS" | grep -iE "banned.*ip" | grep -oE '[0-9]+' | head -1)
+            fi
+            if [ -z "$TOTAL_BANNED" ]; then
+                TOTAL_BANNED=$(echo "$F2B_STATUS" | grep -iE "total.*banned" | grep -oE '[0-9]+' | head -1)
+            fi
         fi
     fi
 fi
