@@ -589,6 +589,7 @@ fail2ban-client status sshd >> "$REPORT_FILE" 2>&1 || echo "Fail2ban 未啟動" 
 log_and_echo "  ✅ 當前封鎖: $BANNED_COUNT, 總計: $TOTAL_BANNED"
 
 # ===== Audit 事件摘要 =====
+log_and_echo "[$(date '+%H:%M:%S')] 🔍 開始 Audit 安全審計檢查..."
 echo "=== 今日 Audit 事件摘要 ===" >> "$REPORT_FILE"
 # 只統計真正可疑的事件：寫入(w)、刪除(unlink)、權限變更(chmod/chown)、執行(execve)
 # 排除正常的讀取操作，減少誤報
@@ -613,6 +614,10 @@ if [ "$AUDIT_EVENTS" -gt 0 ]; then
     ausearch -ts today 2>/dev/null | \
         grep -E 'passwd|sudoers|shadow|sshd_config' | \
         grep -E 'type=SYSCALL.*(write|unlink|chmod|chown|execve)|type=PATH.*(w=|unlink|chmod|chown)' >> "$REPORT_FILE" 2>&1 || true
+    log_and_echo "  ⚠️ Audit 檢查完成 - 可疑操作: $AUDIT_EVENTS"
+    log_and_echo "    快速查看: grep -A 20 '⚠️ 可疑操作' $REPORT_FILE"
+else
+    log_and_echo "  ✅ Audit 檢查完成 - 無可疑操作"
 fi
 
 # ===== 今日登入記錄 =====
@@ -822,9 +827,9 @@ MSG="$MSG%0A🖥 主機: <code>$(hostname)</code>"
 
 # 系統資源狀態
 MSG="$MSG%0A%0A💻 <b>系統資源</b>"
-MSG="$MSG%0A├ CPU: ${MAX_CPU}%% ($MAX_CPU_PROC)"
-MSG="$MSG%0A├ 記憶體: ${MEM_USED}/${MEM_TOTAL} (${MEM_PERCENT}%%)"
-MSG="$MSG%0A└ 磁碟: ${DISK_USAGE}%% 使用中"
+MSG="$MSG%0A├ CPU: ${MAX_CPU}% ($MAX_CPU_PROC)"
+MSG="$MSG%0A├ 記憶體: ${MEM_USED}/${MEM_TOTAL} (${MEM_PERCENT}%)"
+MSG="$MSG%0A└ 磁碟: ${DISK_USAGE}% 使用中"
 
 # 在構建 Telegram 訊息前，確保所有變數都已正確初始化
 # 安全地轉換變數為數字，如果為空或非數字則設為 0
@@ -864,7 +869,8 @@ MSG="$MSG%0A├ 當前封鎖 IP: $BANNED_COUNT (總計: $TOTAL_BANNED)"
 MSG="$MSG%0A├ 敏感檔案變動: $SENSITIVE_COUNT"
 # Audit 異常說明：只統計可疑操作（寫入/刪除/權限變更），不包括正常讀取
 if [ "$AUDIT_EVENTS" -gt 0 ]; then
-    MSG="$MSG%0A└ ⚠️ Audit 可疑操作: $AUDIT_EVENTS (請查看詳細報告)"
+    MSG="$MSG%0A└ ⚠️ Audit 可疑操作: $AUDIT_EVENTS"
+    MSG="$MSG%0A%0A🔍 快速查看: <code>grep -A 20 '⚠️ 可疑操作' /opt/security/logs/daily-report-$(date +%Y%m%d).txt</code>"
 else
     MSG="$MSG%0A└ Audit 可疑操作: 0"
 fi
@@ -874,7 +880,8 @@ MSG="$MSG%0A%0A🛡 <b>威脅掃描</b>"
 MSG="$MSG%0A├ 病毒: $INFECTED_COUNT"
 # Rootkit 警告說明：只統計真正可疑的警告，已過濾常見誤報
 if [ "$ROOTKIT_WARNINGS" -gt 0 ]; then
-    MSG="$MSG%0A├ ⚠️ Rootkit 可疑警告: $ROOTKIT_WARNINGS (請查看詳細報告)"
+    MSG="$MSG%0A├ ⚠️ Rootkit 可疑警告: $ROOTKIT_WARNINGS"
+    MSG="$MSG%0A%0A🔍 快速查看: <code>grep -A 10 'chkrootkit 可疑警告' /opt/security/logs/daily-report-$(date +%Y%m%d).txt</code>"
 else
     MSG="$MSG%0A├ Rootkit 可疑警告: 0"
 fi
@@ -942,7 +949,8 @@ if [ "$SENSITIVE_COUNT" -gt 0 ]; then
     MSG="$MSG%0A%0A⚠️ 敏感檔案:$SENSITIVE_CHANGES"
 fi
 
-MSG="$MSG%0A%0A詳細報告: /opt/security/logs/daily-report-$(date +%Y%m%d).txt"
+MSG="$MSG%0A%0A📄 詳細報告: /opt/security/logs/daily-report-$(date +%Y%m%d).txt"
+MSG="$MSG%0A🔍 快速查看: <code>grep -A 20 '⚠️ 可疑操作\|chkrootkit 可疑警告' /opt/security/logs/daily-report-$(date +%Y%m%d).txt</code>"
 
 # 發送 Telegram
 /opt/security/scripts/send-telegram.sh "$MSG"
@@ -1196,17 +1204,20 @@ MSG="$MSG%0A%0A狀態: $ALERT_LEVEL"
 # 如果有威脅，添加詳細資訊
 if [ "$INFECTED_COUNT" -gt 0 ]; then
     MSG="$MSG%0A%0A⚠️ <b>發現病毒威脅！</b>"
-    MSG="$MSG%0A請查看: /opt/security/logs/clamav-deep-*.log"
+    MSG="$MSG%0A📄 日誌: /opt/security/logs/clamav-deep-*.log"
+    MSG="$MSG%0A🔍 快速查看: <code>grep -i 'FOUND' /opt/security/logs/clamav-deep-$(date +%Y%m%d)*.log | head -20</code>"
 fi
 
 if [ "$ROOTKIT_WARNINGS" -gt 0 ]; then
     MSG="$MSG%0A%0A⚠️ <b>Rootkit 警告！</b>"
-    MSG="$MSG%0A請查看: /opt/security/logs/chkrootkit-deep-*.log"
+    MSG="$MSG%0A📄 日誌: /opt/security/logs/chkrootkit-deep-*.log"
+    MSG="$MSG%0A🔍 快速查看: <code>grep -iE 'INFECTED|ROOTKIT|suspicious' /opt/security/logs/chkrootkit-deep-$(date +%Y%m%d).log</code>"
 fi
 
 if [ "$MALWARE_FOUND" -gt 0 ]; then
     MSG="$MSG%0A%0A⚠️ <b>發現惡意軟體！</b>"
-    MSG="$MSG%0A請查看: /opt/security/logs/maldet-deep-*.log"
+    MSG="$MSG%0A📄 日誌: /opt/security/logs/maldet-deep-*.log"
+    MSG="$MSG%0A🔍 快速查看: <code>grep -i 'malware detected' /opt/security/logs/maldet-deep-$(date +%Y%m%d).log</code>"
 fi
 
 MSG="$MSG%0A%0A📄 完整報告: $LOG"
