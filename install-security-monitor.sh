@@ -1398,18 +1398,15 @@ else
     
     # 檢查日誌文件是否存在且有內容
     if [ -f "$LYNIS_LOG" ] && [ -s "$LYNIS_LOG" ]; then
-        LYNIS_WARNINGS=$(grep -c 'Warning:' $LYNIS_LOG 2>/dev/null || echo 0)
-        LYNIS_SUGGESTIONS=$(grep -c 'Suggestion:' $LYNIS_LOG 2>/dev/null || echo 0)
+        # 使用更可靠的方式統計（避免空字符串問題）
+        LYNIS_WARNINGS=$(grep -c 'Warning:' $LYNIS_LOG 2>/dev/null)
+        LYNIS_SUGGESTIONS=$(grep -c 'Suggestion:' $LYNIS_LOG 2>/dev/null)
         
-        # 移除可能的換行符和空格，確保是純數字
-        LYNIS_WARNINGS=$(echo "$LYNIS_WARNINGS" | tr -d '\n\r ' | grep -oE '[0-9]+' || echo 0)
-        LYNIS_SUGGESTIONS=$(echo "$LYNIS_SUGGESTIONS" | tr -d '\n\r ' | grep -oE '[0-9]+' || echo 0)
-        
-        # 確保是數字
-        if ! [[ "$LYNIS_WARNINGS" =~ ^[0-9]+$ ]]; then
+        # 如果 grep -c 返回空或非數字，設為 0
+        if [ -z "$LYNIS_WARNINGS" ] || ! [[ "$LYNIS_WARNINGS" =~ ^[0-9]+$ ]]; then
             LYNIS_WARNINGS=0
         fi
-        if ! [[ "$LYNIS_SUGGESTIONS" =~ ^[0-9]+$ ]]; then
+        if [ -z "$LYNIS_SUGGESTIONS" ] || ! [[ "$LYNIS_SUGGESTIONS" =~ ^[0-9]+$ ]]; then
             LYNIS_SUGGESTIONS=0
         fi
         
