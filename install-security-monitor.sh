@@ -50,14 +50,49 @@ EOFF"
 cat > /opt/security/scripts/send-telegram.sh << 'EOF'
 #!/bin/bash
 TOKEN_FILE="/opt/security/config/telegram.token"
-if [ ! -f "$TOKEN_FILE" ]; then exit 0; fi
-source "$TOKEN_FILE"
+LOG_FILE="/opt/security/logs/telegram.log"
+
+# 檢查配置檔案是否存在
+if [ ! -f "$TOKEN_FILE" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Telegram 配置檔案不存在: $TOKEN_FILE" >> "$LOG_FILE" 2>&1
+    exit 1
+fi
+
+# 載入配置
+source "$TOKEN_FILE" 2>/dev/null || {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ 無法載入 Telegram 配置" >> "$LOG_FILE" 2>&1
+    exit 1
+}
+
+# 檢查必要的變數
+if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Telegram Token 或 Chat ID 未設定" >> "$LOG_FILE" 2>&1
+    exit 1
+fi
 
 TEXT="$1"
-curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+if [ -z "$TEXT" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ 訊息內容為空" >> "$LOG_FILE" 2>&1
+    exit 1
+fi
+
+# 發送訊息並檢查結果
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
      -d chat_id="${TG_CHAT_ID}" \
      -d text="$TEXT" \
-     -d parse_mode="HTML" >/dev/null 2>&1
+     -d parse_mode="HTML" 2>&1)
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" = "200" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Telegram 訊息發送成功" >> "$LOG_FILE" 2>&1
+    exit 0
+else
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Telegram 訊息發送失敗 (HTTP $HTTP_CODE)" >> "$LOG_FILE" 2>&1
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 回應: $BODY" >> "$LOG_FILE" 2>&1
+    exit 1
+fi
 EOF
 
 chmod +x /opt/security/scripts/send-telegram.sh
@@ -1034,7 +1069,15 @@ MSG="$MSG%0A%0A📄 詳細報告: /opt/security/logs/daily-report-$(date +%Y%m%d
 MSG="$MSG%0A🔍 快速查看: <code>grep -A 20 '⚠️ 可疑操作\|chkrootkit 可疑警告' /opt/security/logs/daily-report-$(date +%Y%m%d).txt</code>"
 
 # 發送 Telegram
-/opt/security/scripts/send-telegram.sh "$MSG"
+log_and_echo "[$(date '+%H:%M:%S')] 📱 發送 Telegram 通知..."
+if /opt/security/scripts/send-telegram.sh "$MSG" 2>&1 | tee -a "$REPORT_FILE"; then
+    log_and_echo "  ✅ Telegram 通知發送成功"
+else
+    log_and_echo "  ❌ Telegram 通知發送失敗，請檢查:"
+    log_and_echo "     - 配置檔案: /opt/security/config/telegram.token"
+    log_and_echo "     - 日誌檔案: /opt/security/logs/telegram.log"
+    log_and_echo "     - 手動測試: /opt/security/scripts/send-telegram.sh '測試訊息'"
+fi
 
 # ===== 清理 30 天前日誌 =====
 find /opt/security/logs -name "daily-report-*.txt" -mtime +30 -delete
