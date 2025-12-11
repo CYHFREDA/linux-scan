@@ -804,9 +804,18 @@ fi
 # ===== 系統更新狀態 =====
 echo "=== 系統更新狀態 (Security Updates) ===" >> "$REPORT_FILE"
 SECURITY_UPDATE_OUTPUT=$(dnf check-update --security 2>&1 || echo "")
-SECURITY_UPDATES=$(echo "$SECURITY_UPDATE_OUTPUT" | grep -c "^[a-zA-Z]" || echo 0)
+# 改進過濾邏輯：只統計真正的套件名稱（排除錯誤訊息、標題行等）
+# 套件名稱格式通常是：package-name.arch 或 package-name-version.arch
+# 排除包含 "Repository", "Last metadata", "Dependencies", "Nothing to do", "Complete" 等行
+SECURITY_UPDATES=$(echo "$SECURITY_UPDATE_OUTPUT" | \
+    grep -vE "Repository|Last metadata|Dependencies|Nothing to do|Complete|Error|Warning|Using id" | \
+    grep -E "^[a-zA-Z0-9].*\.(x86_64|aarch64|noarch|i686)" | \
+    wc -l 2>/dev/null || echo 0)
 # 提取具體的更新套件名稱（前 10 個）
-SECURITY_UPDATE_LIST=$(echo "$SECURITY_UPDATE_OUTPUT" | grep "^[a-zA-Z]" | head -n 10 | awk '{print $1}' | tr '\n' ',' | sed 's/,$//' || echo "")
+SECURITY_UPDATE_LIST=$(echo "$SECURITY_UPDATE_OUTPUT" | \
+    grep -vE "Repository|Last metadata|Dependencies|Nothing to do|Complete|Error|Warning|Using id" | \
+    grep -E "^[a-zA-Z0-9].*\.(x86_64|aarch64|noarch|i686)" | \
+    head -n 10 | awk '{print $1}' | tr '\n' ',' | sed 's/,$//' || echo "")
 echo "$SECURITY_UPDATE_OUTPUT" >> "$REPORT_FILE" 2>&1 || echo "無可用更新" >> "$REPORT_FILE"
 
 # ===== 磁碟使用狀態 =====
