@@ -617,9 +617,11 @@ log_and_echo "[$(date '+%H:%M:%S')] 🔍 開始 Audit 安全審計檢查..."
 echo "=== 今日 Audit 事件摘要 ===" >> "$REPORT_FILE"
 # 只統計真正可疑的事件：寫入(w)、刪除(unlink)、權限變更(chmod/chown)、執行(execve)
 # 排除正常的讀取操作，減少誤報
+# 注意：標準權限設置（如 chmod 0440 /etc/sudoers）也會被記錄，這是正常的審計行為
 AUDIT_EVENTS=$(ausearch -ts today 2>/dev/null | \
     grep -E 'passwd|sudoers|shadow|sshd_config' | \
     grep -E 'type=SYSCALL.*(write|unlink|chmod|chown|execve)|type=PATH.*(w=|unlink|chmod|chown)' | \
+    grep -vE 'chmod.*0440.*sudoers|chmod.*0440.*passwd|chmod.*0440.*shadow' | \
     wc -l 2>/dev/null || echo 0)
 
 # 確保是數字
@@ -634,12 +636,15 @@ ausearch -ts today 2>/dev/null | grep -E 'passwd|sudoers|shadow|sshd_config' >> 
 # 如果有可疑事件，額外記錄
 if [ "$AUDIT_EVENTS" -gt 0 ]; then
     echo "" >> "$REPORT_FILE"
-    echo "=== ⚠️ 可疑操作（寫入/刪除/權限變更）===" >> "$REPORT_FILE"
+    echo "=== ⚠️ 可疑操作（寫入/刪除/權限變更，已排除標準權限設置）===" >> "$REPORT_FILE"
+    echo "說明：以下操作可能是正常的系統維護，也可能是安全威脅，請根據實際情況判斷" >> "$REPORT_FILE"
     ausearch -ts today 2>/dev/null | \
         grep -E 'passwd|sudoers|shadow|sshd_config' | \
-        grep -E 'type=SYSCALL.*(write|unlink|chmod|chown|execve)|type=PATH.*(w=|unlink|chmod|chown)' >> "$REPORT_FILE" 2>&1 || true
+        grep -E 'type=SYSCALL.*(write|unlink|chmod|chown|execve)|type=PATH.*(w=|unlink|chmod|chown)' | \
+        grep -vE 'chmod.*0440.*sudoers|chmod.*0440.*passwd|chmod.*0440.*shadow' >> "$REPORT_FILE" 2>&1 || true
     log_and_echo "  ⚠️ Audit 檢查完成 - 可疑操作: $AUDIT_EVENTS"
     log_and_echo "    快速查看: grep -A 20 '⚠️ 可疑操作' $REPORT_FILE"
+    log_and_echo "    💡 提示：標準權限設置（如 chmod 0440）已排除，這些是正常的維護操作"
 else
     log_and_echo "  ✅ Audit 檢查完成 - 無可疑操作"
 fi
@@ -795,10 +800,11 @@ else
     "$CHKROOTKIT_CMD" > $CHKROOTKIT_LOG 2>&1 || true
     
     # 只統計真正可疑的警告，排除常見誤報
-    # 排除：檢查過程訊息（Checking...）、正常工具警告、SELinux/Docker 相關
+    # 排除：檢查過程訊息（Searching for... nothing found）、正常工具警告、SELinux/Docker 相關
     ROOTKIT_WARNINGS=$(grep -iE "INFECTED|ROOTKIT|suspicious|hidden|trojan|backdoor" $CHKROOTKIT_LOG 2>/dev/null | \
-        grep -vE "Checking |^$|^#" | \
+        grep -vE "^Searching for|nothing found|Checking |^$|^#" | \
         grep -vE "SELinux|docker|container" | \
+        grep -vE "Searching for.*rootkit.*nothing found" | \
         wc -l 2>/dev/null || echo 0)
     
     # 確保是數字
@@ -810,8 +816,9 @@ else
     if [ "$ROOTKIT_WARNINGS" -gt 0 ]; then
         echo "=== ⚠️ chkrootkit 可疑警告 ===" >> "$REPORT_FILE"
         grep -iE "INFECTED|ROOTKIT|suspicious|hidden|trojan|backdoor" $CHKROOTKIT_LOG 2>/dev/null | \
-            grep -vE "Checking |^$|^#" | \
-            grep -vE "SELinux|docker|container" >> "$REPORT_FILE" 2>&1 || true
+            grep -vE "^Searching for|nothing found|Checking |^$|^#" | \
+            grep -vE "SELinux|docker|container" | \
+            grep -vE "Searching for.*rootkit.*nothing found" >> "$REPORT_FILE" 2>&1 || true
     fi
     
     # 計算所有警告（包括誤報）用於參考
@@ -1098,9 +1105,11 @@ else
     # 檢查日誌文件是否存在且有內容
     if [ -f "$CHKROOTKIT_LOG" ] && [ -s "$CHKROOTKIT_LOG" ]; then
         # 只統計真正可疑的警告，排除常見誤報
+        # 排除：檢查過程訊息（Searching for... nothing found）、正常工具警告、SELinux/Docker 相關
         ROOTKIT_WARNINGS=$(grep -iE "INFECTED|ROOTKIT|suspicious|hidden|trojan|backdoor" $CHKROOTKIT_LOG 2>/dev/null | \
-            grep -vE "Checking |^$|^#" | \
+            grep -vE "^Searching for|nothing found|Checking |^$|^#" | \
             grep -vE "SELinux|docker|container" | \
+            grep -vE "Searching for.*rootkit.*nothing found" | \
             wc -l 2>/dev/null || echo 0)
         
         # 確保是數字
