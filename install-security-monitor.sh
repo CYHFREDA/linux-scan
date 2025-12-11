@@ -67,13 +67,22 @@ chmod +x /opt/security/scripts/send-telegram.sh
 echo "安裝必要系統套件..."
 dnf install -y epel-release
 
+# 啟用 CRB repository（某些套件需要，如 glibc-static）
+dnf config-manager --set-enabled crb 2>/dev/null || \
+    dnf config-manager --set-enabled powertools 2>/dev/null || \
+    dnf config-manager --set-enabled devel 2>/dev/null || true
+
+# 安裝主要套件
 dnf install -y \
     fail2ban fail2ban-systemd \
     curl jq audit aide rkhunter \
     clamav clamav-update clamav-server clamav-server-systemd \
     inotify-tools \
     sysstat logrotate psmisc lsof net-tools \
-    gcc make glibc-static
+    gcc make
+
+# 嘗試安裝 glibc-static（可選，如果找不到也不影響）
+dnf install -y glibc-static 2>/dev/null || echo "⚠️ glibc-static 未安裝（可選套件，不影響功能）"
 
 dnf groupinstall "Development Tools" -y
 
