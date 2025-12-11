@@ -551,8 +551,30 @@ systemctl stop process-monitor 2>/dev/null || true
 
 # ===== Fail2ban 統計 =====
 log_and_echo "[$(date '+%H:%M:%S')] 📊 檢查 Fail2ban 狀態..."
-BANNED_COUNT=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $4}' 2>/dev/null || echo "0")
-TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $4}' 2>/dev/null || echo "0")
+BANNED_COUNT=0
+TOTAL_BANNED=0
+
+# 檢查 fail2ban 是否運行
+if systemctl is-active --quiet fail2ban 2>/dev/null; then
+    # 獲取 fail2ban 狀態
+    F2B_STATUS=$(fail2ban-client status sshd 2>/dev/null || echo "")
+    
+    if [ -n "$F2B_STATUS" ]; then
+        # 嘗試多種方式解析（不同版本的 fail2ban 輸出格式可能不同）
+        # 方式1: "Currently banned: 0" 或 "Currently banned: 0 IPs"
+        BANNED_COUNT=$(echo "$F2B_STATUS" | grep -i "Currently banned" | grep -oE '[0-9]+' | head -1)
+        # 方式2: "Total banned: 0" 或 "Total banned: 0 IPs"
+        TOTAL_BANNED=$(echo "$F2B_STATUS" | grep -i "Total banned" | grep -oE '[0-9]+' | head -1)
+        
+        # 如果還是沒找到，嘗試其他格式
+        if [ -z "$BANNED_COUNT" ]; then
+            BANNED_COUNT=$(echo "$F2B_STATUS" | grep -iE "banned.*ip" | grep -oE '[0-9]+' | head -1)
+        fi
+        if [ -z "$TOTAL_BANNED" ]; then
+            TOTAL_BANNED=$(echo "$F2B_STATUS" | grep -iE "total.*banned" | grep -oE '[0-9]+' | head -1)
+        fi
+    fi
+fi
 
 # 確保是數字，如果為空或非數字則設為 0
 if ! [[ "$BANNED_COUNT" =~ ^[0-9]+$ ]]; then
@@ -568,8 +590,30 @@ log_and_echo "  ✅ 當前封鎖: $BANNED_COUNT, 總計: $TOTAL_BANNED"
 
 # ===== Audit 事件摘要 =====
 echo "=== 今日 Audit 事件摘要 ===" >> "$REPORT_FILE"
-AUDIT_EVENTS=$(ausearch -ts today 2>/dev/null | grep -E 'passwd|sudoers|shadow|sshd_config' | wc -l || echo 0)
-ausearch -ts today 2>/dev/null | grep -E 'passwd|sudoers|shadow|sshd_config' >> "$REPORT_FILE" 2>&1 || echo "無異常事件" >> "$REPORT_FILE"
+# 只統計真正可疑的事件：寫入(w)、刪除(unlink)、權限變更(chmod/chown)、執行(execve)
+# 排除正常的讀取操作，減少誤報
+AUDIT_EVENTS=$(ausearch -ts today 2>/dev/null | \
+    grep -E 'passwd|sudoers|shadow|sshd_config' | \
+    grep -E 'type=SYSCALL.*(write|unlink|chmod|chown|execve)|type=PATH.*(w=|unlink|chmod|chown)' | \
+    wc -l 2>/dev/null || echo 0)
+
+# 確保是數字
+if ! [[ "$AUDIT_EVENTS" =~ ^[0-9]+$ ]]; then
+    AUDIT_EVENTS=0
+fi
+
+# 將所有相關事件（包括讀取）記錄到報告中，但只統計可疑操作
+echo "=== 所有相關 Audit 事件（包括正常讀取） ===" >> "$REPORT_FILE"
+ausearch -ts today 2>/dev/null | grep -E 'passwd|sudoers|shadow|sshd_config' >> "$REPORT_FILE" 2>&1 || echo "無事件" >> "$REPORT_FILE"
+
+# 如果有可疑事件，額外記錄
+if [ "$AUDIT_EVENTS" -gt 0 ]; then
+    echo "" >> "$REPORT_FILE"
+    echo "=== ⚠️ 可疑操作（寫入/刪除/權限變更）===" >> "$REPORT_FILE"
+    ausearch -ts today 2>/dev/null | \
+        grep -E 'passwd|sudoers|shadow|sshd_config' | \
+        grep -E 'type=SYSCALL.*(write|unlink|chmod|chown|execve)|type=PATH.*(w=|unlink|chmod|chown)' >> "$REPORT_FILE" 2>&1 || true
+fi
 
 # ===== 今日登入記錄 =====
 echo "=== 今日登入記錄 ===" >> "$REPORT_FILE"
@@ -720,8 +764,35 @@ if [ -z "$CHKROOTKIT_CMD" ]; then
     ROOTKIT_WARNINGS=0
 else
     "$CHKROOTKIT_CMD" > $CHKROOTKIT_LOG 2>&1 || true
-    ROOTKIT_WARNINGS=$(grep -i "warning\|infected" $CHKROOTKIT_LOG | wc -l || echo 0)
-    log_and_echo "  ✅ chkrootkit 掃描完成 - 警告: $ROOTKIT_WARNINGS"
+    
+    # 只統計真正可疑的警告，排除常見誤報
+    # 排除：檢查過程訊息（Checking...）、正常工具警告、SELinux/Docker 相關
+    ROOTKIT_WARNINGS=$(grep -iE "INFECTED|ROOTKIT|suspicious|hidden|trojan|backdoor" $CHKROOTKIT_LOG 2>/dev/null | \
+        grep -vE "Checking |^$|^#" | \
+        grep -vE "SELinux|docker|container" | \
+        wc -l 2>/dev/null || echo 0)
+    
+    # 確保是數字
+    if ! [[ "$ROOTKIT_WARNINGS" =~ ^[0-9]+$ ]]; then
+        ROOTKIT_WARNINGS=0
+    fi
+    
+    # 如果有真正的警告，記錄詳細資訊到報告
+    if [ "$ROOTKIT_WARNINGS" -gt 0 ]; then
+        echo "=== ⚠️ chkrootkit 可疑警告 ===" >> "$REPORT_FILE"
+        grep -iE "INFECTED|ROOTKIT|suspicious|hidden|trojan|backdoor" $CHKROOTKIT_LOG 2>/dev/null | \
+            grep -vE "Checking |^$|^#" | \
+            grep -vE "SELinux|docker|container" >> "$REPORT_FILE" 2>&1 || true
+    fi
+    
+    # 計算所有警告（包括誤報）用於參考
+    TOTAL_WARNINGS=$(grep -i "warning\|infected" $CHKROOTKIT_LOG 2>/dev/null | wc -l 2>/dev/null || echo 0)
+    
+    if [ "$ROOTKIT_WARNINGS" -gt 0 ]; then
+        log_and_echo "  ⚠️ chkrootkit 掃描完成 - 可疑警告: $ROOTKIT_WARNINGS (總警告: $TOTAL_WARNINGS，已過濾常見誤報)"
+    else
+        log_and_echo "  ✅ chkrootkit 掃描完成 - 無可疑警告 (總警告: $TOTAL_WARNINGS，均為常見誤報)"
+    fi
 fi
 
 # ===== LMD 掃描 =====
@@ -755,6 +826,35 @@ MSG="$MSG%0A├ CPU: ${MAX_CPU}%% ($MAX_CPU_PROC)"
 MSG="$MSG%0A├ 記憶體: ${MEM_USED}/${MEM_TOTAL} (${MEM_PERCENT}%%)"
 MSG="$MSG%0A└ 磁碟: ${DISK_USAGE}%% 使用中"
 
+# 在構建 Telegram 訊息前，確保所有變數都已正確初始化
+# 安全地轉換變數為數字，如果為空或非數字則設為 0
+BANNED_COUNT=${BANNED_COUNT:-0}
+TOTAL_BANNED=${TOTAL_BANNED:-0}
+INFECTED_COUNT=${INFECTED_COUNT:-0}
+ROOTKIT_WARNINGS=${ROOTKIT_WARNINGS:-0}
+MALWARE_FOUND=${MALWARE_FOUND:-0}
+SENSITIVE_COUNT=${SENSITIVE_COUNT:-0}
+FAILED_LOGIN=${FAILED_LOGIN:-0}
+DISK_USAGE=${DISK_USAGE:-0}
+AUDIT_EVENTS=${AUDIT_EVENTS:-0}
+LOGIN_COUNT=${LOGIN_COUNT:-0}
+SECURITY_UPDATES=${SECURITY_UPDATES:-0}
+FILE_CHANGES_COUNT=${FILE_CHANGES_COUNT:-0}
+
+# 確保是數字（如果不是數字則設為 0）
+if ! [[ "$BANNED_COUNT" =~ ^[0-9]+$ ]]; then BANNED_COUNT=0; fi
+if ! [[ "$TOTAL_BANNED" =~ ^[0-9]+$ ]]; then TOTAL_BANNED=0; fi
+if ! [[ "$INFECTED_COUNT" =~ ^[0-9]+$ ]]; then INFECTED_COUNT=0; fi
+if ! [[ "$ROOTKIT_WARNINGS" =~ ^[0-9]+$ ]]; then ROOTKIT_WARNINGS=0; fi
+if ! [[ "$MALWARE_FOUND" =~ ^[0-9]+$ ]]; then MALWARE_FOUND=0; fi
+if ! [[ "$SENSITIVE_COUNT" =~ ^[0-9]+$ ]]; then SENSITIVE_COUNT=0; fi
+if ! [[ "$FAILED_LOGIN" =~ ^[0-9]+$ ]]; then FAILED_LOGIN=0; fi
+if ! [[ "$DISK_USAGE" =~ ^[0-9]+$ ]]; then DISK_USAGE=0; fi
+if ! [[ "$AUDIT_EVENTS" =~ ^[0-9]+$ ]]; then AUDIT_EVENTS=0; fi
+if ! [[ "$LOGIN_COUNT" =~ ^[0-9]+$ ]]; then LOGIN_COUNT=0; fi
+if ! [[ "$SECURITY_UPDATES" =~ ^[0-9]+$ ]]; then SECURITY_UPDATES=0; fi
+if ! [[ "$FILE_CHANGES_COUNT" =~ ^[0-9]+$ ]]; then FILE_CHANGES_COUNT=0; fi
+
 # 安全事件
 MSG="$MSG%0A%0A🔐 <b>安全事件</b>"
 MSG="$MSG%0A├ 登入次數: $LOGIN_COUNT"
@@ -762,12 +862,22 @@ MSG="$MSG%0A├ 登入次數: $LOGIN_COUNT"
 MSG="$MSG%0A├ 登入失敗: $FAILED_LOGIN 次"
 MSG="$MSG%0A├ 當前封鎖 IP: $BANNED_COUNT (總計: $TOTAL_BANNED)"
 MSG="$MSG%0A├ 敏感檔案變動: $SENSITIVE_COUNT"
-MSG="$MSG%0A└ Audit 異常: $AUDIT_EVENTS"
+# Audit 異常說明：只統計可疑操作（寫入/刪除/權限變更），不包括正常讀取
+if [ "$AUDIT_EVENTS" -gt 0 ]; then
+    MSG="$MSG%0A└ ⚠️ Audit 可疑操作: $AUDIT_EVENTS (請查看詳細報告)"
+else
+    MSG="$MSG%0A└ Audit 可疑操作: 0"
+fi
 
 # 威脅掃描
 MSG="$MSG%0A%0A🛡 <b>威脅掃描</b>"
 MSG="$MSG%0A├ 病毒: $INFECTED_COUNT"
-MSG="$MSG%0A├ Rootkit 警告: $ROOTKIT_WARNINGS"
+# Rootkit 警告說明：只統計真正可疑的警告，已過濾常見誤報
+if [ "$ROOTKIT_WARNINGS" -gt 0 ]; then
+    MSG="$MSG%0A├ ⚠️ Rootkit 可疑警告: $ROOTKIT_WARNINGS (請查看詳細報告)"
+else
+    MSG="$MSG%0A├ Rootkit 可疑警告: 0"
+fi
 MSG="$MSG%0A└ 惡意軟體: $MALWARE_FOUND"
 
 # 系統維護
@@ -863,7 +973,7 @@ cat > /etc/cron.daily/security-deep-scan << 'EOF'
 #!/bin/bash
 # 不使用 set -e，允許部分掃描失敗但不影響整體
 
-LOG="/opt/security/reports/daily-$(date +%F).txt"
+LOG="/opt/security/reports/deep-scan-$(date +%F).txt"
 SCAN_DATE=$(date '+%Y-%m-%d %H:%M:%S')
 SCAN_START_EPOCH=$(date +%s)
 
@@ -942,7 +1052,16 @@ else
     
     # 檢查日誌文件是否存在且有內容
     if [ -f "$CHKROOTKIT_LOG" ] && [ -s "$CHKROOTKIT_LOG" ]; then
-        ROOTKIT_WARNINGS=$(grep -iE "warning|infected|suspicious" $CHKROOTKIT_LOG | wc -l || echo 0)
+        # 只統計真正可疑的警告，排除常見誤報
+        ROOTKIT_WARNINGS=$(grep -iE "INFECTED|ROOTKIT|suspicious|hidden|trojan|backdoor" $CHKROOTKIT_LOG 2>/dev/null | \
+            grep -vE "Checking |^$|^#" | \
+            grep -vE "SELinux|docker|container" | \
+            wc -l 2>/dev/null || echo 0)
+        
+        # 確保是數字
+        if ! [[ "$ROOTKIT_WARNINGS" =~ ^[0-9]+$ ]]; then
+            ROOTKIT_WARNINGS=0
+        fi
         log_and_echo "  ✅ chkrootkit 掃描完成 - 警告: $ROOTKIT_WARNINGS"
     else
         ROOTKIT_WARNINGS=0
@@ -1233,11 +1352,11 @@ if ! grep -q "# Security Monitor - 深度安全掃描" /etc/crontab; then
     # 如果命令已存在但沒有註解，在命令前插入註解
     if grep -q "security-deep-scan" /etc/crontab; then
         # 在 security-deep-scan 行前插入註解
-        sed -i '/security-deep-scan/i# Security Monitor - 深度安全掃描 (每天凌晨 2:00)' /etc/crontab
+        sed -i '/security-deep-scan/i# Security Monitor - 深度安全掃描 (每週日凌晨 2:00)' /etc/crontab
     else
         # 如果命令不存在，添加註解和命令
-        echo "# Security Monitor - 深度安全掃描 (每天凌晨 2:00)" >> /etc/crontab
-        echo "0 2 * * * root /etc/cron.daily/security-deep-scan" >> /etc/crontab
+        echo "# Security Monitor - 深度安全掃描 (每週日凌晨 2:00)" >> /etc/crontab
+        echo "0 2 * * 0 root /etc/cron.daily/security-deep-scan" >> /etc/crontab
     fi
 fi
 
