@@ -803,8 +803,11 @@ fi
 
 # ===== 系統更新狀態 =====
 echo "=== 系統更新狀態 (Security Updates) ===" >> "$REPORT_FILE"
-SECURITY_UPDATES=$(dnf check-update --security 2>&1 | grep -c "^[a-zA-Z]" || echo 0)
-dnf check-update --security >> "$REPORT_FILE" 2>&1 || echo "無可用更新" >> "$REPORT_FILE"
+SECURITY_UPDATE_OUTPUT=$(dnf check-update --security 2>&1 || echo "")
+SECURITY_UPDATES=$(echo "$SECURITY_UPDATE_OUTPUT" | grep -c "^[a-zA-Z]" || echo 0)
+# 提取具體的更新套件名稱（前 10 個）
+SECURITY_UPDATE_LIST=$(echo "$SECURITY_UPDATE_OUTPUT" | grep "^[a-zA-Z]" | head -n 10 | awk '{print $1}' | tr '\n' ',' | sed 's/,$//' || echo "")
+echo "$SECURITY_UPDATE_OUTPUT" >> "$REPORT_FILE" 2>&1 || echo "無可用更新" >> "$REPORT_FILE"
 
 # ===== 磁碟使用狀態 =====
 echo "=== 磁碟使用狀態 ===" >> "$REPORT_FILE"
@@ -1027,6 +1030,7 @@ DISK_USAGE=${DISK_USAGE:-0}
 AUDIT_EVENTS=${AUDIT_EVENTS:-0}
 LOGIN_COUNT=${LOGIN_COUNT:-0}
 SECURITY_UPDATES=${SECURITY_UPDATES:-0}
+SECURITY_UPDATE_LIST=${SECURITY_UPDATE_LIST:-""}
 FILE_CHANGES_COUNT=${FILE_CHANGES_COUNT:-0}
 
 # 確保是數字（如果不是數字則設為 0）
@@ -1072,7 +1076,23 @@ MSG="$MSG%0A└ 惡意軟體: $MALWARE_FOUND"
 
 # 系統維護
 MSG="$MSG%0A%0A🔧 <b>系統維護</b>"
-MSG="$MSG%0A├ 安全更新: $SECURITY_UPDATES 個"
+if [ "$SECURITY_UPDATES" -gt 0 ]; then
+    MSG="$MSG%0A├ ⚠️ 安全更新: $SECURITY_UPDATES 個"
+    if [ -n "$SECURITY_UPDATE_LIST" ]; then
+        # 如果更新套件列表太長，截斷
+        UPDATE_DISPLAY="$SECURITY_UPDATE_LIST"
+        if [ ${#UPDATE_DISPLAY} -gt 100 ]; then
+            UPDATE_DISPLAY=$(echo "$UPDATE_DISPLAY" | cut -c1-97)"..."
+        fi
+        MSG="$MSG%0A│ 套件: $UPDATE_DISPLAY"
+        if [ "$SECURITY_UPDATES" -gt 10 ]; then
+            MSG="$MSG%0A│ （還有 $((SECURITY_UPDATES - 10)) 個更新，請查看詳細報告）"
+        fi
+        MSG="$MSG%0A│ 💡 更新指令: <code>dnf update --security -y</code>"
+    fi
+else
+    MSG="$MSG%0A├ 安全更新: 0 個"
+fi
 MSG="$MSG%0A└ 檔案變動 (24h): $FILE_CHANGES_COUNT"
 
 # 添加警告標記（確保所有變數都是數字）
@@ -1088,6 +1108,7 @@ DISK_USAGE=${DISK_USAGE:-0}
 AUDIT_EVENTS=${AUDIT_EVENTS:-0}
 LOGIN_COUNT=${LOGIN_COUNT:-0}
 SECURITY_UPDATES=${SECURITY_UPDATES:-0}
+SECURITY_UPDATE_LIST=${SECURITY_UPDATE_LIST:-""}
 FILE_CHANGES_COUNT=${FILE_CHANGES_COUNT:-0}
 
 # 確保是數字（如果不是數字則設為 0）
