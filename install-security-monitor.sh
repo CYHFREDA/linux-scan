@@ -283,6 +283,30 @@ sudo dnf install chkrootkit -y || {
 }
 
 #########################################
+# 初始化 AIDE（檔案完整性監控）
+#########################################
+echo "初始化 AIDE 檔案完整性監控..."
+# 檢查 AIDE 是否已初始化
+if [ ! -f /var/lib/aide/aide.db.gz ] && [ ! -f /var/lib/aide/aide.db ]; then
+    echo "AIDE 尚未初始化，正在初始化..."
+    # 初始化 AIDE 資料庫（這可能需要幾分鐘）
+    if aide --init > /tmp/aide-init.log 2>&1; then
+        # 移動新資料庫到正確位置
+        if [ -f /var/lib/aide/aide.db.new.gz ]; then
+            mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+            echo "✅ AIDE 初始化完成"
+        else
+            echo "⚠️ AIDE 初始化完成，但資料庫檔案未找到"
+        fi
+    else
+        echo "⚠️ AIDE 初始化失敗（可能需要手動執行）"
+        echo "   手動初始化: aide --init && mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz"
+    fi
+else
+    echo "✅ AIDE 已初始化"
+fi
+
+#########################################
 # 安裝 Lynis
 #########################################
 echo "下載 Lynis v3.1.6..."
@@ -1147,7 +1171,15 @@ log_and_echo ""
 # ===== AIDE 檢查 =====
 log_and_echo "[$(date '+%H:%M:%S')] 📝 步驟 5/5: 開始 AIDE 檔案完整性檢查..."
 AIDE_LOG="/opt/security/logs/aide-deep-$(date +%Y%m%d).log"
-if aide --check > $AIDE_LOG 2>&1; then
+
+# 檢查 AIDE 資料庫是否存在
+if [ ! -f /var/lib/aide/aide.db.gz ] && [ ! -f /var/lib/aide/aide.db ]; then
+    AIDE_CHANGES=0
+    log_and_echo "  ⚠️ AIDE 尚未初始化（資料庫不存在）"
+    log_and_echo "  💡 初始化指令: <code>aide --init && mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz</code>"
+    log_and_echo "  ℹ️ 初始化後，AIDE 將建立系統檔案基準，之後可檢測檔案變更"
+    echo "AIDE 未初始化，請執行: aide --init && mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz" > $AIDE_LOG
+elif aide --check > $AIDE_LOG 2>&1; then
     AIDE_CHANGES=$(grep -c "changed:" $AIDE_LOG 2>/dev/null || echo 0)
     # 確保是數字
     if ! [[ "$AIDE_CHANGES" =~ ^[0-9]+$ ]]; then
@@ -1156,7 +1188,13 @@ if aide --check > $AIDE_LOG 2>&1; then
     log_and_echo "  ✅ AIDE 檢查完成 - 變更: $AIDE_CHANGES"
 else
     AIDE_CHANGES=0
-    log_and_echo "  ⚠️ AIDE 檢查失敗（可能尚未初始化），繼續執行..."
+    # 檢查是否為初始化相關錯誤
+    if grep -qi "database\|not found\|未找到" $AIDE_LOG 2>/dev/null; then
+        log_and_echo "  ⚠️ AIDE 檢查失敗（資料庫不存在或未初始化）"
+        log_and_echo "  💡 初始化指令: <code>aide --init && mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz</code>"
+    else
+        log_and_echo "  ⚠️ AIDE 檢查失敗，請查看日誌: $AIDE_LOG"
+    fi
 fi
 cat $AIDE_LOG >> $LOG
 log_and_echo ""
