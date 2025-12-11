@@ -762,6 +762,45 @@ fi
 LOGIN_USERS=$(last -F | grep "$(date +%a\ %b\ %e)" | awk '{print $1}' | sort -u | tr '\n' ',' | sed 's/,$//' || echo "無")
 last -F | grep "$(date +%a\ %b\ %e)" >> "$REPORT_FILE" 2>&1
 
+# ===== 嘗試獲取真實 IP（通過 JMS 或其他跳板機）=====
+echo "" >> "$REPORT_FILE"
+echo "=== 真實 IP 記錄（從 SSH 日誌和環境變數） ===" >> "$REPORT_FILE"
+# 從 /var/log/secure 中提取 SSH 登入記錄，包含真實 IP（如果 JMS 有記錄）
+# JMS 通常會在 SSH 連接時記錄真實 IP，格式可能是：
+# "Accepted publickey for user from REAL_IP port XXXXX ssh2"
+# 或通過環境變數傳遞
+if [ -f /var/log/secure ]; then
+    # 提取今日的 SSH 登入記錄，包含 IP 信息
+    TODAY_DATE=$(date +%b\ %e)
+    grep "$TODAY_DATE" /var/log/secure 2>/dev/null | \
+        grep -E "Accepted (publickey|password|keyboard-interactive)" | \
+        awk '{print $1, $2, $3, $9, $11}' | \
+        sort -u >> "$REPORT_FILE" 2>&1 || echo "無 SSH 登入記錄" >> "$REPORT_FILE"
+    
+    # 嘗試從環境變數中提取真實 IP（如果 JMS 有設置）
+    # JMS 可能會設置 SSH_CLIENT, SSH_CONNECTION, 或自定義變數
+    echo "" >> "$REPORT_FILE"
+    echo "=== 當前活躍 SSH 會話的真實 IP（從環境變數） ===" >> "$REPORT_FILE"
+    # 檢查當前活躍的 SSH 會話
+    for pid in $(pgrep -f "sshd:" 2>/dev/null); do
+        if [ -d "/proc/$pid" ]; then
+            # 嘗試從進程環境變數中提取真實 IP
+            REAL_IP=$(cat /proc/$pid/environ 2>/dev/null | tr '\0' '\n' | grep -E "SSH_CLIENT|SSH_CONNECTION|JMS_REAL_IP|REAL_IP" | head -1 || echo "")
+            if [ -n "$REAL_IP" ]; then
+                USER=$(ps -o user= -p $pid 2>/dev/null | tr -d ' ')
+                echo "PID $pid (用戶: $USER): $REAL_IP" >> "$REPORT_FILE"
+            fi
+        fi
+    done
+    # 如果沒有找到，顯示提示
+    if ! grep -q "PID.*REAL_IP\|SSH_CLIENT\|SSH_CONNECTION" "$REPORT_FILE" 2>/dev/null; then
+        echo "提示：如果使用 JMS 跳板機，真實 IP 可能記錄在 JMS 服務器上" >> "$REPORT_FILE"
+        echo "建議：檢查 JMS 的日誌或配置 JMS 在 SSH 連接時設置環境變數（如 JMS_REAL_IP）" >> "$REPORT_FILE"
+    fi
+else
+    echo "無法讀取 /var/log/secure" >> "$REPORT_FILE"
+fi
+
 # ===== 系統更新狀態 =====
 echo "=== 系統更新狀態 (Security Updates) ===" >> "$REPORT_FILE"
 SECURITY_UPDATES=$(dnf check-update --security 2>&1 | grep -c "^[a-zA-Z]" || echo 0)
