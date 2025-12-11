@@ -618,10 +618,14 @@ echo "=== 今日 Audit 事件摘要 ===" >> "$REPORT_FILE"
 # 只統計真正可疑的事件：寫入(w)、刪除(unlink)、權限變更(chmod/chown)、執行(execve)
 # 排除正常的讀取操作，減少誤報
 # 注意：標準權限設置（如 chmod 0440 /etc/sudoers）也會被記錄，這是正常的審計行為
+# 過濾標準權限設置：
+# - 0440 (0x120 十六進制) = sudoers 標準權限
+# - 0644 (0x1a4 十六進制) = passwd 標準權限  
+# - 0000 (0x0) = shadow 標準權限（但通常不會用 chmod 設置）
 AUDIT_EVENTS=$(ausearch -ts today 2>/dev/null | \
     grep -E 'passwd|sudoers|shadow|sshd_config' | \
     grep -E 'type=SYSCALL.*(write|unlink|chmod|chown|execve)|type=PATH.*(w=|unlink|chmod|chown)' | \
-    grep -vE 'chmod.*0440.*sudoers|chmod.*0440.*passwd|chmod.*0440.*shadow' | \
+    grep -vE 'a2=0x120|a2=0x1a4|a2=0x180|chmod.*0440|chmod.*0644|chmod.*0600|proctitle=.*chmod.*0440' | \
     wc -l 2>/dev/null || echo 0)
 
 # 確保是數字
@@ -638,10 +642,40 @@ if [ "$AUDIT_EVENTS" -gt 0 ]; then
     echo "" >> "$REPORT_FILE"
     echo "=== ⚠️ 可疑操作（寫入/刪除/權限變更，已排除標準權限設置）===" >> "$REPORT_FILE"
     echo "說明：以下操作可能是正常的系統維護，也可能是安全威脅，請根據實際情況判斷" >> "$REPORT_FILE"
-    ausearch -ts today 2>/dev/null | \
+    echo "" >> "$REPORT_FILE"
+    
+    # 獲取可疑操作（過濾標準權限設置）
+    # a2=120 (十進制) 或 a2=0x120 (十六進制) = chmod 0440 (標準 sudoers 權限)
+    # a2=420 (十進制) 或 a2=0x1a4 (十六進制) = chmod 0644 (標準 passwd 權限)
+    SUSPICIOUS_OPS=$(ausearch -ts today 2>/dev/null | \
         grep -E 'passwd|sudoers|shadow|sshd_config' | \
         grep -E 'type=SYSCALL.*(write|unlink|chmod|chown|execve)|type=PATH.*(w=|unlink|chmod|chown)' | \
-        grep -vE 'chmod.*0440.*sudoers|chmod.*0440.*passwd|chmod.*0440.*shadow' >> "$REPORT_FILE" 2>&1 || true
+        grep -vE 'a2=120|a2=0x120|a2=420|a2=0x1a4|a2=384|a2=0x180|chmod.*0440|chmod.*0644|chmod.*0600' || echo "")
+    
+    if [ -n "$SUSPICIOUS_OPS" ]; then
+        echo "⚠️ 發現可疑操作，詳細資訊如下：" >> "$REPORT_FILE"
+        echo "" >> "$REPORT_FILE"
+        
+        # 使用 ausearch -i 格式化輸出，更易讀
+        echo "【易讀格式】" >> "$REPORT_FILE"
+        # 提取所有相關的 audit key
+        for key in sudoers_changes passwd_changes shadow_changes sshd_config_changes; do
+            KEY_OPS=$(ausearch -ts today -k "$key" -i 2>/dev/null | \
+                grep -vE 'chmod.*0440|chmod.*0644|chmod.*0600' | \
+                grep -E 'chmod|write|unlink|chown|execve' || echo "")
+            if [ -n "$KEY_OPS" ]; then
+                echo "--- $key ---" >> "$REPORT_FILE"
+                echo "$KEY_OPS" | head -10 >> "$REPORT_FILE"
+                echo "" >> "$REPORT_FILE"
+            fi
+        done
+        
+        echo "【原始 Audit 記錄】" >> "$REPORT_FILE"
+        echo "$SUSPICIOUS_OPS" >> "$REPORT_FILE"
+    else
+        echo "✅ 無可疑操作（所有操作都是標準權限設置或正常維護）" >> "$REPORT_FILE"
+        echo "說明：chmod 0440 /etc/sudoers 等標準權限設置已被過濾" >> "$REPORT_FILE"
+    fi
     log_and_echo "  ⚠️ Audit 檢查完成 - 可疑操作: $AUDIT_EVENTS"
     log_and_echo "    快速查看: grep -A 20 '⚠️ 可疑操作' $REPORT_FILE"
     log_and_echo "    💡 提示：標準權限設置（如 chmod 0440）已排除，這些是正常的維護操作"
@@ -683,10 +717,15 @@ echo "=== 重要服務狀態 ===" >> "$REPORT_FILE"
 FAILED_SERVICES=""
 for svc in sshd nginx mysql docker; do
     if systemctl is-active --quiet $svc 2>/dev/null; then
-        echo "$svc: 運行中" >> "$REPORT_FILE"
+        echo "$svc: 運行中 ✅" >> "$REPORT_FILE"
     else
-        FAILED_SERVICES="$FAILED_SERVICES $svc"
-        echo "$svc: 未啟動" >> "$REPORT_FILE"
+        # 檢查服務是否存在（可能未安裝）
+        if systemctl list-unit-files | grep -q "^${svc}\." 2>/dev/null; then
+            FAILED_SERVICES="$FAILED_SERVICES $svc"
+            echo "$svc: 未啟動 ⚠️" >> "$REPORT_FILE"
+        else
+            echo "$svc: 未安裝（可選服務）" >> "$REPORT_FILE"
+        fi
     fi
 done
 
@@ -721,8 +760,13 @@ else
 fi
 
 # ===== 檢查敏感檔案變動 =====
+# 檢查過去24小時內被修改的敏感檔案
 SENSITIVE_CHANGES=$(find /etc/passwd /etc/shadow /etc/sudoers /etc/ssh/sshd_config -mtime -1 2>/dev/null || echo "")
-SENSITIVE_COUNT=$(echo "$SENSITIVE_CHANGES" | grep -v "^$" | wc -l)
+SENSITIVE_COUNT=$(echo "$SENSITIVE_CHANGES" | grep -v "^$" | wc -l 2>/dev/null || echo 0)
+# 確保是數字
+if ! [[ "$SENSITIVE_COUNT" =~ ^[0-9]+$ ]]; then
+    SENSITIVE_COUNT=0
+fi
 
 # ===== 日誌摘要 (secure) =====
 echo "=== /var/log/secure 今日摘要 ===" >> "$REPORT_FILE"
@@ -967,7 +1011,8 @@ MSG="$MSG$LYNIS_MSG"
 
 # 添加服務異常（如果有）
 if [ -n "$FAILED_SERVICES" ]; then
-    MSG="$MSG%0A%0A⚠️ 服務異常:$FAILED_SERVICES"
+    MSG="$MSG%0A%0A⚠️ 服務未啟動:$FAILED_SERVICES"
+    MSG="$MSG%0A💡 檢查指令: <code>systemctl status nginx mysql</code>"
 fi
 
 # 添加異常 IP 連線
@@ -977,7 +1022,12 @@ fi
 
 # 添加敏感檔案變動詳情
 if [ "$SENSITIVE_COUNT" -gt 0 ]; then
-    MSG="$MSG%0A%0A⚠️ 敏感檔案:$SENSITIVE_CHANGES"
+    MSG="$MSG%0A%0A⚠️ 敏感檔案變動（過去24小時）:"
+    # 格式化檔案列表
+    SENSITIVE_LIST=$(echo "$SENSITIVE_CHANGES" | tr '\n' ' ' | sed 's/ $//')
+    MSG="$MSG%0A$SENSITIVE_LIST"
+    MSG="$MSG%0A💡 檢查指令: <code>ls -la /etc/passwd /etc/shadow && stat /etc/passwd /etc/shadow</code>"
+    MSG="$MSG%0Aℹ️ 可能是正常維護（用戶管理、權限調整等），請確認是否為預期操作"
 fi
 
 MSG="$MSG%0A%0A📄 詳細報告: /opt/security/logs/daily-report-$(date +%Y%m%d).txt"
