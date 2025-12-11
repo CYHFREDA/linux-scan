@@ -536,45 +536,219 @@ echo "每日檢查完成 - 報告已發送至 Telegram"
 #########################################
 cat > /etc/cron.daily/security-deep-scan << 'EOF'
 #!/bin/bash
+set -e
+
 LOG="/opt/security/reports/daily-$(date +%F).txt"
+SCAN_DATE=$(date '+%Y-%m-%d %H:%M:%S')
 
-echo "===== Security Deep Scan Report =====" >> $LOG
+echo "===== Security Deep Scan Report - $SCAN_DATE =====" > $LOG
 
-nice -n 19 ionice -c3 /opt/lynis/lynis audit system >> $LOG
-nice -n 19 ionice -c3 chkrootkit >> $LOG
-maldet -u >> $LOG
-nice -n 19 ionice -c3 maldet -b -r /home /var/www /opt >> $LOG
+# ===== Lynis 掃描 =====
+echo "[$(date)] 開始 Lynis 掃描..." >> $LOG
+LYNIS_LOG="/opt/security/logs/lynis-deep-$(date +%Y%m%d).log"
+nice -n 19 ionice -c3 /opt/lynis/lynis audit system --quiet > $LYNIS_LOG 2>&1
+LYNIS_WARNINGS=$(grep -c 'Warning:' $LYNIS_LOG 2>/dev/null || echo 0)
+LYNIS_SUGGESTIONS=$(grep -c 'Suggestion:' $LYNIS_LOG 2>/dev/null || echo 0)
+cat $LYNIS_LOG >> $LOG
+
+# ===== chkrootkit 掃描 =====
+echo "[$(date)] 開始 chkrootkit 掃描..." >> $LOG
+CHKROOTKIT_LOG="/opt/security/logs/chkrootkit-deep-$(date +%Y%m%d).log"
+nice -n 19 ionice -c3 chkrootkit > $CHKROOTKIT_LOG 2>&1
+ROOTKIT_WARNINGS=$(grep -iE "warning|infected|suspicious" $CHKROOTKIT_LOG | wc -l || echo 0)
+cat $CHKROOTKIT_LOG >> $LOG
+
+# ===== Maldet 更新 =====
+echo "[$(date)] 更新 Maldet 特徵庫..." >> $LOG
+maldet -u >> $LOG 2>&1 || true
+
+# ===== Maldet 掃描 =====
+echo "[$(date)] 開始 Maldet 掃描..." >> $LOG
+MALDET_LOG="/opt/security/logs/maldet-deep-$(date +%Y%m%d).log"
+nice -n 19 ionice -c3 maldet -b -r /home /var/www /opt > $MALDET_LOG 2>&1 || true
+MALWARE_FOUND=$(grep -iE "malware detected|threats found" $MALDET_LOG | wc -l || echo 0)
+cat $MALDET_LOG >> $LOG
+
+# ===== ClamAV 掃描 =====
+echo "[$(date)] 開始 ClamAV 掃描..." >> $LOG
+INFECTED_COUNT=0
 for dir in /home /root /opt /var/www; do
     [ -d "$dir" ] || continue
-    nice -n 19 ionice -c3 clamscan -r "$dir" --infected --quiet >> $LOG
+    CLAMAV_LOG="/opt/security/logs/clamav-deep-$(date +%Y%m%d)-$(basename $dir).log"
+    nice -n 19 ionice -c3 clamscan -r "$dir" --infected --quiet > $CLAMAV_LOG 2>&1 || true
+    DIR_INFECTED=$(grep -c "FOUND" $CLAMAV_LOG 2>/dev/null || echo 0)
+    INFECTED_COUNT=$((INFECTED_COUNT + DIR_INFECTED))
+    cat $CLAMAV_LOG >> $LOG
 done
-aide --check >> $LOG 2>/dev/null || true
+
+# ===== AIDE 檢查 =====
+echo "[$(date)] 開始 AIDE 檢查..." >> $LOG
+AIDE_LOG="/opt/security/logs/aide-deep-$(date +%Y%m%d).log"
+aide --check > $AIDE_LOG 2>&1 || true
+AIDE_CHANGES=$(grep -c "changed:" $AIDE_LOG 2>/dev/null || echo 0)
+cat $AIDE_LOG >> $LOG
+
+# ===== 掃描完成時間 =====
+SCAN_END=$(date '+%Y-%m-%d %H:%M:%S')
+echo "[$SCAN_END] 深度掃描完成" >> $LOG
+
+# ===== 構建 Telegram 通知訊息 =====
+MSG="🔍 <b>深度安全掃描完成</b> - $(date +%m/%d %H:%M)%0A━━━━━━━━━━━━━━━━"
+MSG="$MSG%0A🖥 主機: <code>$(hostname)</code>"
+MSG="$MSG%0A⏱ 掃描時間: $SCAN_DATE → $SCAN_END"
+
+# 掃描結果摘要
+MSG="$MSG%0A%0A📊 <b>掃描結果摘要</b>"
+MSG="$MSG%0A├ 🦠 病毒威脅: $INFECTED_COUNT"
+MSG="$MSG%0A├ 🕵️ Rootkit 警告: $ROOTKIT_WARNINGS"
+MSG="$MSG%0A├ 🦠 惡意軟體: $MALWARE_FOUND"
+MSG="$MSG%0A├ ⚠️ Lynis 警告: $LYNIS_WARNINGS"
+MSG="$MSG%0A├ 💡 Lynis 建議: $LYNIS_SUGGESTIONS"
+MSG="$MSG%0A└ 📝 AIDE 變更: $AIDE_CHANGES"
+
+# 判斷警告等級
+ALERT_LEVEL="🟢 正常"
+if [ "$INFECTED_COUNT" -gt 0 ] || [ "$ROOTKIT_WARNINGS" -gt 5 ] || [ "$MALWARE_FOUND" -gt 0 ] || [ "$AIDE_CHANGES" -gt 10 ]; then
+    ALERT_LEVEL="🔴 需要立即關注"
+elif [ "$ROOTKIT_WARNINGS" -gt 0 ] || [ "$LYNIS_WARNINGS" -gt 10 ] || [ "$AIDE_CHANGES" -gt 5 ]; then
+    ALERT_LEVEL="🟡 需要檢查"
+fi
+
+MSG="$MSG%0A%0A狀態: $ALERT_LEVEL"
+
+# 如果有威脅，添加詳細資訊
+if [ "$INFECTED_COUNT" -gt 0 ]; then
+    MSG="$MSG%0A%0A⚠️ <b>發現病毒威脅！</b>"
+    MSG="$MSG%0A請查看: /opt/security/logs/clamav-deep-*.log"
+fi
+
+if [ "$ROOTKIT_WARNINGS" -gt 0 ]; then
+    MSG="$MSG%0A%0A⚠️ <b>Rootkit 警告！</b>"
+    MSG="$MSG%0A請查看: /opt/security/logs/chkrootkit-deep-*.log"
+fi
+
+if [ "$MALWARE_FOUND" -gt 0 ]; then
+    MSG="$MSG%0A%0A⚠️ <b>發現惡意軟體！</b>"
+    MSG="$MSG%0A請查看: /opt/security/logs/maldet-deep-*.log"
+fi
+
+MSG="$MSG%0A%0A📄 完整報告: $LOG"
+
+# 發送 Telegram 通知
+/opt/security/scripts/send-telegram.sh "$MSG"
+
+echo "深度掃描完成，通知已發送 ✅"
 EOF
 
 chmod +x /etc/cron.daily/security-deep-scan
 
 #########################################
-# 檢查監控服務狀態
+# 檢查監控服務狀態並確保正常運行
 #########################################
-echo "檢查 Security Monitor 服務狀態..."
+echo "檢查 Security Monitor 服務狀態並確保正常運行..."
 
 declare -a SVC=("reverse-shell-detector" "process-monitor" "network-monitor" "file-monitor")
+declare -a FAILED_SERVICES=()
 
+# 檢查並修復監控服務
 for svc in "${SVC[@]}"; do
-    if systemctl is-active --quiet "$svc"; then
+    echo "檢查 $svc..."
+    
+    # 檢查是否啟用開機自動啟動
+    if ! systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+        echo "  → 啟用開機自動啟動..."
+        systemctl enable "$svc" 2>/dev/null || true
+    fi
+    
+    # 檢查是否正在運行
+    if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
+        echo "  → 啟動服務..."
+        systemctl start "$svc" 2>/dev/null || {
+            echo "  ⚠️ 無法啟動 $svc"
+            FAILED_SERVICES+=("$svc")
+            continue
+        }
+        sleep 1
+    fi
+    
+    # 再次確認狀態
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
         STATUS="運行中 ✅"
     else
         STATUS="未啟動 ❌"
+        FAILED_SERVICES+=("$svc")
     fi
 
-    if systemctl is-enabled --quiet "$svc"; then
+    if systemctl is-enabled --quiet "$svc" 2>/dev/null; then
         ENABLED="已啟用開機自動啟動 ✅"
     else
         ENABLED="未啟用開機自動啟動 ❌"
     fi
 
-    echo "- $svc: $STATUS, $ENABLED"
+    echo "  ✓ $svc: $STATUS, $ENABLED"
 done
+
+# 檢查 ClamAV 服務
+echo "檢查 ClamAV 服務..."
+if ! systemctl is-enabled --quiet clamd@scan.service 2>/dev/null; then
+    echo "  → 啟用 ClamAV 開機自動啟動..."
+    systemctl enable clamd@scan.service 2>/dev/null || true
+fi
+
+if ! systemctl is-active --quiet clamd@scan.service 2>/dev/null; then
+    echo "  → 啟動 ClamAV 服務..."
+    systemctl start clamd@scan.service 2>/dev/null || true
+    sleep 2
+fi
+
+if systemctl is-active --quiet clamd@scan.service 2>/dev/null; then
+    echo "  ✓ clamd@scan: 運行中 ✅, 開機自動啟動: $(systemctl is-enabled clamd@scan.service 2>/dev/null && echo '已啟用 ✅' || echo '未啟用 ❌')"
+else
+    echo "  ⚠️ clamd@scan: 未啟動 ❌"
+    FAILED_SERVICES+=("clamd@scan")
+fi
+
+# 顯示最終狀態摘要
+echo ""
+echo "==========================================="
+echo "服務狀態摘要："
+echo "==========================================="
+
+for svc in "${SVC[@]}"; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        STATUS="✅ 運行中"
+    else
+        STATUS="❌ 未啟動"
+    fi
+    
+    if systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+        ENABLED="✅ 開機自動啟動"
+    else
+        ENABLED="❌ 未啟用開機自動啟動"
+    fi
+    
+    echo "  $svc: $STATUS | $ENABLED"
+done
+
+if systemctl is-active --quiet clamd@scan.service 2>/dev/null; then
+    echo "  clamd@scan: ✅ 運行中 | $(systemctl is-enabled clamd@scan.service 2>/dev/null && echo '✅ 開機自動啟動' || echo '❌ 未啟用開機自動啟動')"
+else
+    echo "  clamd@scan: ❌ 未啟動"
+fi
+
+# 如果有失敗的服務，顯示警告
+if [ ${#FAILED_SERVICES[@]} -gt 0 ]; then
+    echo ""
+    echo "⚠️ 警告：以下服務無法正常啟動："
+    for svc in "${FAILED_SERVICES[@]}"; do
+        echo "  - $svc"
+    done
+    echo "請手動檢查：systemctl status <服務名稱>"
+else
+    echo ""
+    echo "✅ 所有服務運行正常，開機後會自動啟動！"
+fi
+echo "==========================================="
 
 #########################################
 # ===== 設定 crontab =====
