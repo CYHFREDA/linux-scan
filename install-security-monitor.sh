@@ -119,8 +119,16 @@ chown -R 989:988 /var/lib/clamav
 chmod 755 /var/lib/clamav
 chmod 700 /var/lib/clamav/tmp
 
+# 確保臨時目錄有正確權限（freshclam 需要寫入）
+# 由於我們用 root 執行，臨時目錄需要對 root 可寫
+chmod 1777 /var/lib/clamav/tmp 2>/dev/null || chmod 777 /var/lib/clamav/tmp 2>/dev/null || true
+
 # 更新病毒庫（用 root 執行避免權限問題）
-freshclam || true
+# 設置環境變數讓 freshclam 使用系統臨時目錄，避免權限問題
+export TMPDIR=/tmp
+freshclam 2>&1 | grep -v "ERROR.*tmp" || {
+    echo "⚠️ ClamAV 更新失敗，但不影響服務啟動（可稍後手動執行 freshclam）"
+}
 
 # systemd override 讓 clamd@scan 用 root 執行
 mkdir -p /etc/systemd/system/clamd@scan.service.d
@@ -296,19 +304,26 @@ EOF
 cat > /opt/security/scripts/process-monitor.sh << 'EOF'
 #!/bin/bash
 LOG="/opt/security/logs/process-monitor.log"
+CHECK_INTERVAL=300  # 每 5 分鐘檢查一次
 
-ps aux --sort=-%cpu | head -n 5 > /opt/security/tmp/top.txt
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Process Monitor Started (每 ${CHECK_INTERVAL}s 檢查)" >> "$LOG"
 
-while read -r line; do
-    cpu=$(echo "$line" | awk '{print $3}')
-    mem=$(echo "$line" | awk '{print $4}')
-    cmd=$(echo "$line" | awk '{print $11}')
+while true; do
+    ps aux --sort=-%cpu | head -n 5 > /opt/security/tmp/top.txt
 
-    if (( $(echo "$cpu > 70" | bc -l) )); then
-        echo "$line" >> "$LOG"
-        /opt/security/scripts/send-telegram.sh "⚠️ <b>High CPU Usage</b>%0A$cmd%0ACPU: $cpu%"
-    fi
-done < /opt/security/tmp/top.txt
+    while read -r line; do
+        cpu=$(echo "$line" | awk '{print $3}')
+        mem=$(echo "$line" | awk '{print $4}')
+        cmd=$(echo "$line" | awk '{print $11}')
+
+        if (( $(echo "$cpu > 70" | bc -l) )); then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] $line" >> "$LOG"
+            /opt/security/scripts/send-telegram.sh "⚠️ <b>High CPU Usage</b>%0A$cmd%0ACPU: $cpu%"
+        fi
+    done < /opt/security/tmp/top.txt
+
+    sleep $CHECK_INTERVAL
+done
 EOF
 
 # ==== Network Monitor ====
