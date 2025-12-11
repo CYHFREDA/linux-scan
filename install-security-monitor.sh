@@ -512,8 +512,11 @@ for dir in "${CLAMAV_DIRS[@]}"; do
     SCAN_RESULT=$(nice -n 19 ionice -c3 clamdscan --fdpass --multiscan --infected --quiet "$dir" 2>&1 || true)
     echo "$SCAN_RESULT" >> "$CLAMAV_LOG"
     # 安全地計算感染數量，確保是數字
-    FOUND_COUNT=$(echo "$SCAN_RESULT" | grep -c "FOUND" 2>/dev/null || echo "0")
-    FOUND_COUNT=${FOUND_COUNT:-0}  # 如果為空則設為 0
+    FOUND_COUNT=$(echo "$SCAN_RESULT" | grep -o "FOUND" 2>/dev/null | wc -l)
+    # 確保是數字，如果為空或非數字則設為 0
+    if ! [[ "$FOUND_COUNT" =~ ^[0-9]+$ ]]; then
+        FOUND_COUNT=0
+    fi
     INFECTED_COUNT=$((INFECTED_COUNT + FOUND_COUNT))
 done
 
@@ -619,63 +622,118 @@ EOFF
 #########################################
 cat > /etc/cron.daily/security-deep-scan << 'EOF'
 #!/bin/bash
-set -e
+# 不使用 set -e，允許部分掃描失敗但不影響整體
 
 LOG="/opt/security/reports/daily-$(date +%F).txt"
 SCAN_DATE=$(date '+%Y-%m-%d %H:%M:%S')
+SCAN_START_EPOCH=$(date +%s)
 
-echo "===== Security Deep Scan Report - $SCAN_DATE =====" > $LOG
+# 同時輸出到終端和日誌
+log_and_echo() {
+    echo "$1" | tee -a "$LOG"
+}
+
+log_and_echo "==========================================="
+log_and_echo "🔍 開始深度安全掃描 - $SCAN_DATE"
+log_and_echo "==========================================="
+log_and_echo ""
 
 # ===== Lynis 掃描 =====
-echo "[$(date)] 開始 Lynis 掃描..." >> $LOG
+log_and_echo "[$(date '+%H:%M:%S')] 📋 步驟 1/5: 開始 Lynis 系統審計掃描..."
 LYNIS_LOG="/opt/security/logs/lynis-deep-$(date +%Y%m%d).log"
-nice -n 19 ionice -c3 /opt/lynis/lynis audit system --quiet > $LYNIS_LOG 2>&1
-LYNIS_WARNINGS=$(grep -c 'Warning:' $LYNIS_LOG 2>/dev/null || echo 0)
-LYNIS_SUGGESTIONS=$(grep -c 'Suggestion:' $LYNIS_LOG 2>/dev/null || echo 0)
+if nice -n 19 ionice -c3 /opt/lynis/lynis audit system --quiet > $LYNIS_LOG 2>&1; then
+    LYNIS_WARNINGS=$(grep -c 'Warning:' $LYNIS_LOG 2>/dev/null || echo 0)
+    LYNIS_SUGGESTIONS=$(grep -c 'Suggestion:' $LYNIS_LOG 2>/dev/null || echo 0)
+    log_and_echo "  ✅ Lynis 掃描完成 - 警告: $LYNIS_WARNINGS, 建議: $LYNIS_SUGGESTIONS"
+else
+    LYNIS_WARNINGS=0
+    LYNIS_SUGGESTIONS=0
+    log_and_echo "  ⚠️ Lynis 掃描失敗，繼續執行..."
+fi
 cat $LYNIS_LOG >> $LOG
+log_and_echo ""
 
 # ===== chkrootkit 掃描 =====
-echo "[$(date)] 開始 chkrootkit 掃描..." >> $LOG
+log_and_echo "[$(date '+%H:%M:%S')] 🔍 步驟 2/5: 開始 chkrootkit Rootkit 掃描..."
 CHKROOTKIT_LOG="/opt/security/logs/chkrootkit-deep-$(date +%Y%m%d).log"
-nice -n 19 ionice -c3 chkrootkit > $CHKROOTKIT_LOG 2>&1
-ROOTKIT_WARNINGS=$(grep -iE "warning|infected|suspicious" $CHKROOTKIT_LOG | wc -l || echo 0)
+if nice -n 19 ionice -c3 chkrootkit > $CHKROOTKIT_LOG 2>&1; then
+    ROOTKIT_WARNINGS=$(grep -iE "warning|infected|suspicious" $CHKROOTKIT_LOG | wc -l || echo 0)
+    log_and_echo "  ✅ chkrootkit 掃描完成 - 警告: $ROOTKIT_WARNINGS"
+else
+    ROOTKIT_WARNINGS=0
+    log_and_echo "  ⚠️ chkrootkit 掃描失敗，繼續執行..."
+fi
 cat $CHKROOTKIT_LOG >> $LOG
+log_and_echo ""
 
 # ===== Maldet 更新 =====
-echo "[$(date)] 更新 Maldet 特徵庫..." >> $LOG
-maldet -u >> $LOG 2>&1 || true
+log_and_echo "[$(date '+%H:%M:%S')] 🔄 更新 Maldet 特徵庫..."
+maldet -u >> $LOG 2>&1 && log_and_echo "  ✅ Maldet 特徵庫更新完成" || log_and_echo "  ⚠️ Maldet 更新失敗，繼續執行..."
 
 # ===== Maldet 掃描 =====
-echo "[$(date)] 開始 Maldet 掃描..." >> $LOG
+log_and_echo "[$(date '+%H:%M:%S')] 🦠 步驟 3/5: 開始 Maldet 惡意軟體掃描（這可能需要較長時間）..."
 MALDET_LOG="/opt/security/logs/maldet-deep-$(date +%Y%m%d).log"
-nice -n 19 ionice -c3 maldet -b -r /home /var/www /opt > $MALDET_LOG 2>&1 || true
-MALWARE_FOUND=$(grep -iE "malware detected|threats found" $MALDET_LOG | wc -l || echo 0)
+if nice -n 19 ionice -c3 maldet -b -r /home /var/www /opt > $MALDET_LOG 2>&1; then
+    MALWARE_FOUND=$(grep -iE "malware detected|threats found" $MALDET_LOG | wc -l || echo 0)
+    log_and_echo "  ✅ Maldet 掃描完成 - 發現: $MALWARE_FOUND"
+else
+    MALWARE_FOUND=0
+    log_and_echo "  ⚠️ Maldet 掃描失敗，繼續執行..."
+fi
 cat $MALDET_LOG >> $LOG
+log_and_echo ""
 
 # ===== ClamAV 掃描 =====
-echo "[$(date)] 開始 ClamAV 掃描..." >> $LOG
+log_and_echo "[$(date '+%H:%M:%S')] 🦠 步驟 4/5: 開始 ClamAV 病毒掃描（這可能需要較長時間）..."
 INFECTED_COUNT=0
+SCAN_DIRS=0
 for dir in /home /root /opt /var/www; do
     [ -d "$dir" ] || continue
+    SCAN_DIRS=$((SCAN_DIRS + 1))
+    log_and_echo "  📁 掃描目錄: $dir"
     CLAMAV_LOG="/opt/security/logs/clamav-deep-$(date +%Y%m%d)-$(basename $dir).log"
-    nice -n 19 ionice -c3 clamscan -r "$dir" --infected --quiet > $CLAMAV_LOG 2>&1 || true
-    # 安全地計算感染數量，確保是數字
-    DIR_INFECTED=$(grep -c "FOUND" $CLAMAV_LOG 2>/dev/null || echo "0")
-    DIR_INFECTED=${DIR_INFECTED:-0}  # 如果為空則設為 0
-    INFECTED_COUNT=$((INFECTED_COUNT + DIR_INFECTED))
+    if nice -n 19 ionice -c3 clamscan -r "$dir" --infected --quiet > $CLAMAV_LOG 2>&1; then
+        # 安全地計算感染數量，確保是數字
+        DIR_INFECTED=$(grep -o "FOUND" $CLAMAV_LOG 2>/dev/null | wc -l)
+        # 確保是數字，如果為空或非數字則設為 0
+        if ! [[ "$DIR_INFECTED" =~ ^[0-9]+$ ]]; then
+            DIR_INFECTED=0
+        fi
+        INFECTED_COUNT=$((INFECTED_COUNT + DIR_INFECTED))
+        log_and_echo "    ✅ $dir 掃描完成 - 發現: $DIR_INFECTED"
+    else
+        log_and_echo "    ⚠️ $dir 掃描失敗，繼續..."
+    fi
     cat $CLAMAV_LOG >> $LOG
 done
+log_and_echo "  ✅ ClamAV 掃描完成 - 總計發現: $INFECTED_COUNT"
+log_and_echo ""
 
 # ===== AIDE 檢查 =====
-echo "[$(date)] 開始 AIDE 檢查..." >> $LOG
+log_and_echo "[$(date '+%H:%M:%S')] 📝 步驟 5/5: 開始 AIDE 檔案完整性檢查..."
 AIDE_LOG="/opt/security/logs/aide-deep-$(date +%Y%m%d).log"
-aide --check > $AIDE_LOG 2>&1 || true
-AIDE_CHANGES=$(grep -c "changed:" $AIDE_LOG 2>/dev/null || echo 0)
+if aide --check > $AIDE_LOG 2>&1; then
+    AIDE_CHANGES=$(grep -c "changed:" $AIDE_LOG 2>/dev/null || echo 0)
+    log_and_echo "  ✅ AIDE 檢查完成 - 變更: $AIDE_CHANGES"
+else
+    AIDE_CHANGES=0
+    log_and_echo "  ⚠️ AIDE 檢查失敗（可能尚未初始化），繼續執行..."
+fi
 cat $AIDE_LOG >> $LOG
+log_and_echo ""
 
 # ===== 掃描完成時間 =====
 SCAN_END=$(date '+%Y-%m-%d %H:%M:%S')
-echo "[$SCAN_END] 深度掃描完成" >> $LOG
+SCAN_END_EPOCH=$(date +%s)
+SCAN_DURATION=$((SCAN_END_EPOCH - SCAN_START_EPOCH))
+SCAN_MINUTES=$((SCAN_DURATION / 60))
+SCAN_SECONDS=$((SCAN_DURATION % 60))
+log_and_echo "==========================================="
+log_and_echo "✅ 深度掃描完成！"
+log_and_echo "⏱ 總耗時: ${SCAN_MINUTES} 分 ${SCAN_SECONDS} 秒"
+log_and_echo "📄 完整報告: $LOG"
+log_and_echo "==========================================="
+echo "[$SCAN_END] 深度掃描完成 (耗時: ${SCAN_MINUTES}分${SCAN_SECONDS}秒)" >> $LOG
 
 # ===== 構建 Telegram 通知訊息 =====
 MSG="🔍 <b>深度安全掃描完成</b> - $(date +%m/%d %H:%M)%0A━━━━━━━━━━━━━━━━"
