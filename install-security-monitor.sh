@@ -116,20 +116,47 @@ rm -f /var/run/clamd.scan/clamd.sock
 
 # 建立資料夾並正確授權給 clamav
 mkdir -p /var/lib/clamav/tmp
-chown -R 989:988 /var/lib/clamav
-chmod 755 /var/lib/clamav
-chmod 700 /var/lib/clamav/tmp
 
-# 確保臨時目錄有正確權限（freshclam 需要寫入）
-# 由於我們用 root 執行，臨時目錄需要對 root 可寫
+# 檢查系統中實際的 clamav 用戶和組 ID
+CLAMAV_UID=$(id -u clamupdate 2>/dev/null || id -u clamav 2>/dev/null || echo "989")
+CLAMAV_GID=$(id -g clamupdate 2>/dev/null || id -g clamav 2>/dev/null || echo "988")
+
+# 嘗試多種方式設置權限（兼容不同系統）
+# 優先使用用戶名，如果失敗則嘗試多種 UID/GID 組合
+chown -R clamupdate:clamupdate /var/lib/clamav 2>/dev/null || \
+chown -R clamav:clamav /var/lib/clamav 2>/dev/null || \
+chown -R "$CLAMAV_UID:$CLAMAV_GID" /var/lib/clamav 2>/dev/null || \
+chown -R 990:989 /var/lib/clamav 2>/dev/null || \
+chown -R 989:988 /var/lib/clamav 2>/dev/null || true
+
+chmod 755 /var/lib/clamav
 chmod 1777 /var/lib/clamav/tmp 2>/dev/null || chmod 777 /var/lib/clamav/tmp 2>/dev/null || true
 
-# 更新病毒庫（用 root 執行避免權限問題）
+# 確保資料庫目錄對 clamav 用戶可寫
+chmod 755 /var/lib/clamav
+chmod 755 /var/lib/clamav/tmp 2>/dev/null || true
+
+# 更新病毒庫
 # 設置環境變數讓 freshclam 使用系統臨時目錄，避免權限問題
 export TMPDIR=/tmp
-freshclam 2>&1 | grep -v "ERROR.*tmp" || {
-    echo "⚠️ ClamAV 更新失敗，但不影響服務啟動（可稍後手動執行 freshclam）"
-}
+export TMP=/tmp
+
+# 確保資料庫目錄對 clamav 用戶可寫（freshclam 需要）
+# 嘗試以 clamupdate 用戶執行，如果失敗則以 root 執行
+if id clamupdate &>/dev/null; then
+    # 以 clamupdate 用戶執行 freshclam（推薦方式）
+    su -s /bin/bash -c "export TMPDIR=/tmp TMP=/tmp; freshclam" clamupdate 2>&1 | grep -v "ERROR.*tmp" || {
+        echo "⚠️ ClamAV 更新失敗（以 clamupdate 用戶），嘗試以 root 執行..."
+        freshclam 2>&1 | grep -v "ERROR.*tmp" || {
+            echo "⚠️ ClamAV 更新失敗，但不影響服務啟動（可稍後手動執行 freshclam）"
+        }
+    }
+else
+    # 如果沒有 clamupdate 用戶，直接以 root 執行
+    freshclam 2>&1 | grep -v "ERROR.*tmp" || {
+        echo "⚠️ ClamAV 更新失敗，但不影響服務啟動（可稍後手動執行 freshclam）"
+    }
+fi
 
 # systemd override 讓 clamd@scan 用 root 執行
 mkdir -p /etc/systemd/system/clamd@scan.service.d
@@ -178,14 +205,37 @@ sudo dnf install chkrootkit -y || {
             cd /tmp 2>/dev/null || cd / 2>/dev/null || true
         }
         
-        if [ -d "$(pwd)" ]; then
+        if [ -d "$(pwd)" ] && [ -f "Makefile" ]; then
             echo "編譯..."
             if sudo make sense 2>/dev/null; then
-                echo "安裝到 /usr/local/bin..."
-                # 複製檔案而不是創建符號連結，避免源目錄被刪除後連結失效
-                sudo cp -f "$(pwd)/chkrootkit" /usr/local/bin/chkrootkit
-                sudo chmod +x /usr/local/bin/chkrootkit
-                echo "chkrootkit 安裝完成！"
+                if [ -f "chkrootkit" ]; then
+                    echo "安裝到 /usr/local/bin..."
+                    # 獲取源文件的完整絕對路徑
+                    SOURCE_FILE="$(pwd)/chkrootkit"
+                    SOURCE_ABS=$(readlink -f "$SOURCE_FILE" 2>/dev/null || realpath "$SOURCE_FILE" 2>/dev/null || echo "$SOURCE_FILE")
+                    
+                    # 檢查目標文件是否存在（可能是符號連結或普通文件）
+                    if [ -e "/usr/local/bin/chkrootkit" ]; then
+                        TARGET_ABS=$(readlink -f /usr/local/bin/chkrootkit 2>/dev/null || realpath /usr/local/bin/chkrootkit 2>/dev/null || echo "/usr/local/bin/chkrootkit")
+                        # 如果源文件和目標文件是同一個文件，跳過複製
+                        if [ "$SOURCE_ABS" = "$TARGET_ABS" ]; then
+                            echo "⚠️ chkrootkit 已存在於目標位置（可能是符號連結），跳過複製"
+                        else
+                            # 先刪除現有文件，然後複製
+                            sudo rm -f /usr/local/bin/chkrootkit
+                            sudo cp -f "$SOURCE_FILE" /usr/local/bin/chkrootkit
+                            sudo chmod +x /usr/local/bin/chkrootkit
+                            echo "chkrootkit 安裝完成！"
+                        fi
+                    else
+                        # 目標文件不存在，直接複製
+                        sudo cp -f "$SOURCE_FILE" /usr/local/bin/chkrootkit
+                        sudo chmod +x /usr/local/bin/chkrootkit
+                        echo "chkrootkit 安裝完成！"
+                    fi
+                else
+                    echo "❌ 找不到編譯後的 chkrootkit 檔案"
+                fi
             else
                 echo "❌ chkrootkit 編譯失敗，跳過安裝"
             fi
