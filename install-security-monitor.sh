@@ -502,14 +502,19 @@ grep "$(date +%b\ %e)" /var/log/secure >> "$REPORT_FILE" 2>&1 || echo "無事件
 CLAMAV_DIRS=(/home /root /opt /var/www /srv/data /data /backup)
 CLAMAV_LOG="/opt/security/logs/clamav-daily-$(date +%Y%m%d).log"
 
-freshclam || true
+# 更新病毒庫（使用系統臨時目錄避免權限問題）
+export TMPDIR=/tmp
+freshclam 2>&1 | grep -v "ERROR.*tmp" || echo "⚠️ ClamAV 更新失敗，繼續使用現有病毒庫" >> "$REPORT_FILE"
 
 INFECTED_COUNT=0
 for dir in "${CLAMAV_DIRS[@]}"; do
     [ -d "$dir" ] || continue
     SCAN_RESULT=$(nice -n 19 ionice -c3 clamdscan --fdpass --multiscan --infected --quiet "$dir" 2>&1 || true)
     echo "$SCAN_RESULT" >> "$CLAMAV_LOG"
-    INFECTED_COUNT=$((INFECTED_COUNT + $(echo "$SCAN_RESULT" | grep -c "FOUND" || echo 0)))
+    # 安全地計算感染數量，確保是數字
+    FOUND_COUNT=$(echo "$SCAN_RESULT" | grep -c "FOUND" 2>/dev/null || echo "0")
+    FOUND_COUNT=${FOUND_COUNT:-0}  # 如果為空則設為 0
+    INFECTED_COUNT=$((INFECTED_COUNT + FOUND_COUNT))
 done
 
 # ===== chkrootkit 掃描 =====
@@ -654,7 +659,9 @@ for dir in /home /root /opt /var/www; do
     [ -d "$dir" ] || continue
     CLAMAV_LOG="/opt/security/logs/clamav-deep-$(date +%Y%m%d)-$(basename $dir).log"
     nice -n 19 ionice -c3 clamscan -r "$dir" --infected --quiet > $CLAMAV_LOG 2>&1 || true
-    DIR_INFECTED=$(grep -c "FOUND" $CLAMAV_LOG 2>/dev/null || echo 0)
+    # 安全地計算感染數量，確保是數字
+    DIR_INFECTED=$(grep -c "FOUND" $CLAMAV_LOG 2>/dev/null || echo "0")
+    DIR_INFECTED=${DIR_INFECTED:-0}  # 如果為空則設為 0
     INFECTED_COUNT=$((INFECTED_COUNT + DIR_INFECTED))
     cat $CLAMAV_LOG >> $LOG
 done
