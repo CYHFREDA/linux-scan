@@ -728,6 +728,14 @@ LOG="/opt/security/reports/daily-$(date +%F).txt"
 SCAN_DATE=$(date '+%Y-%m-%d %H:%M:%S')
 SCAN_START_EPOCH=$(date +%s)
 
+# 初始化所有計數變數（避免未定義變數錯誤）
+INFECTED_COUNT=0
+ROOTKIT_WARNINGS=0
+MALWARE_FOUND=0
+AIDE_CHANGES=0
+LYNIS_WARNINGS=0
+LYNIS_SUGGESTIONS=0
+
 # 同時輸出到終端和日誌
 log_and_echo() {
     echo "$1" | tee -a "$LOG"
@@ -862,6 +870,10 @@ log_and_echo "[$(date '+%H:%M:%S')] 📝 步驟 5/5: 開始 AIDE 檔案完整性
 AIDE_LOG="/opt/security/logs/aide-deep-$(date +%Y%m%d).log"
 if aide --check > $AIDE_LOG 2>&1; then
     AIDE_CHANGES=$(grep -c "changed:" $AIDE_LOG 2>/dev/null || echo 0)
+    # 確保是數字
+    if ! [[ "$AIDE_CHANGES" =~ ^[0-9]+$ ]]; then
+        AIDE_CHANGES=0
+    fi
     log_and_echo "  ✅ AIDE 檢查完成 - 變更: $AIDE_CHANGES"
 else
     AIDE_CHANGES=0
@@ -884,7 +896,7 @@ log_and_echo "==========================================="
 echo "[$SCAN_END] 深度掃描完成 (耗時: ${SCAN_MINUTES}分${SCAN_SECONDS}秒)" >> $LOG
 
 # ===== 構建 Telegram 通知訊息 =====
-MSG="🔍 <b>深度安全掃描完成</b> - $(date +%m/%d %H:%M)%0A━━━━━━━━━━━━━━━━"
+MSG="🔍 <b>深度安全掃描完成</b> - $(date '+%m/%d %H:%M')%0A━━━━━━━━━━━━━━━━"
 MSG="$MSG%0A🖥 主機: <code>$(hostname)</code>"
 MSG="$MSG%0A⏱ 掃描時間: $SCAN_DATE → $SCAN_END"
 
@@ -897,7 +909,23 @@ MSG="$MSG%0A├ ⚠️ Lynis 警告: $LYNIS_WARNINGS"
 MSG="$MSG%0A├ 💡 Lynis 建議: $LYNIS_SUGGESTIONS"
 MSG="$MSG%0A└ 📝 AIDE 變更: $AIDE_CHANGES"
 
-# 判斷警告等級
+# 判斷警告等級（確保所有變數都是數字）
+# 安全地轉換變數為數字，如果為空或非數字則設為 0
+INFECTED_COUNT=${INFECTED_COUNT:-0}
+ROOTKIT_WARNINGS=${ROOTKIT_WARNINGS:-0}
+MALWARE_FOUND=${MALWARE_FOUND:-0}
+AIDE_CHANGES=${AIDE_CHANGES:-0}
+LYNIS_WARNINGS=${LYNIS_WARNINGS:-0}
+LYNIS_SUGGESTIONS=${LYNIS_SUGGESTIONS:-0}
+
+# 確保是數字（如果不是數字則設為 0）
+if ! [[ "$INFECTED_COUNT" =~ ^[0-9]+$ ]]; then INFECTED_COUNT=0; fi
+if ! [[ "$ROOTKIT_WARNINGS" =~ ^[0-9]+$ ]]; then ROOTKIT_WARNINGS=0; fi
+if ! [[ "$MALWARE_FOUND" =~ ^[0-9]+$ ]]; then MALWARE_FOUND=0; fi
+if ! [[ "$AIDE_CHANGES" =~ ^[0-9]+$ ]]; then AIDE_CHANGES=0; fi
+if ! [[ "$LYNIS_WARNINGS" =~ ^[0-9]+$ ]]; then LYNIS_WARNINGS=0; fi
+if ! [[ "$LYNIS_SUGGESTIONS" =~ ^[0-9]+$ ]]; then LYNIS_SUGGESTIONS=0; fi
+
 ALERT_LEVEL="🟢 正常"
 if [ "$INFECTED_COUNT" -gt 0 ] || [ "$ROOTKIT_WARNINGS" -gt 5 ] || [ "$MALWARE_FOUND" -gt 0 ] || [ "$AIDE_CHANGES" -gt 10 ]; then
     ALERT_LEVEL="🔴 需要立即關注"
