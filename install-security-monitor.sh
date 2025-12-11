@@ -168,8 +168,10 @@ sudo dnf install chkrootkit -y || {
     echo "編譯..."
     sudo make sense
 
-    echo "建立可執行連結..."
-    sudo ln -sf "$(pwd)/chkrootkit" /usr/local/bin/chkrootkit
+    echo "安裝到 /usr/local/bin..."
+    # 複製檔案而不是創建符號連結，避免源目錄被刪除後連結失效
+    sudo cp -f "$(pwd)/chkrootkit" /usr/local/bin/chkrootkit
+    sudo chmod +x /usr/local/bin/chkrootkit
 
     echo "chkrootkit 安裝完成！"
     
@@ -562,9 +564,24 @@ log_and_echo "  ✅ ClamAV 掃描完成 - 掃描 $SCANNED_DIRS 個目錄，發�
 # ===== chkrootkit 掃描 =====
 log_and_echo "[$(date '+%H:%M:%S')] 🔍 開始 chkrootkit Rootkit 掃描..."
 CHKROOTKIT_LOG="/opt/security/logs/chkrootkit-$(date +%Y%m%d).log"
-chkrootkit > $CHKROOTKIT_LOG 2>&1 || true
-ROOTKIT_WARNINGS=$(grep -i "warning\|infected" $CHKROOTKIT_LOG | wc -l || echo 0)
-log_and_echo "  ✅ chkrootkit 掃描完成 - 警告: $ROOTKIT_WARNINGS"
+
+# 查找 chkrootkit 可執行檔（檢查多個可能位置）
+CHKROOTKIT_CMD=""
+for path in /usr/local/bin/chkrootkit /usr/bin/chkrootkit /opt/security/tools/chkrootkit-master/chkrootkit $(command -v chkrootkit 2>/dev/null); do
+    if [ -f "$path" ] && [ -x "$path" ]; then
+        CHKROOTKIT_CMD="$path"
+        break
+    fi
+done
+
+if [ -z "$CHKROOTKIT_CMD" ]; then
+    log_and_echo "  ⚠️ chkrootkit 未找到，跳過掃描"
+    ROOTKIT_WARNINGS=0
+else
+    "$CHKROOTKIT_CMD" > $CHKROOTKIT_LOG 2>&1 || true
+    ROOTKIT_WARNINGS=$(grep -i "warning\|infected" $CHKROOTKIT_LOG | wc -l || echo 0)
+    log_and_echo "  ✅ chkrootkit 掃描完成 - 警告: $ROOTKIT_WARNINGS"
+fi
 
 # ===== LMD 掃描 =====
 log_and_echo "[$(date '+%H:%M:%S')] 🦠 開始 Maldet 惡意軟體掃描..."
@@ -723,14 +740,24 @@ log_and_echo ""
 log_and_echo "[$(date '+%H:%M:%S')] 🔍 步驟 2/5: 開始 chkrootkit Rootkit 掃描..."
 CHKROOTKIT_LOG="/opt/security/logs/chkrootkit-deep-$(date +%Y%m%d).log"
 
-# 檢查 chkrootkit 是否安裝
-if ! command -v chkrootkit >/dev/null 2>&1; then
-    log_and_echo "  ❌ chkrootkit 未安裝或不在 PATH 中"
-    log_and_echo "    嘗試查找: $(which chkrootkit 2>/dev/null || echo '未找到')"
+# 查找 chkrootkit 可執行檔（檢查多個可能位置）
+CHKROOTKIT_CMD=""
+for path in /usr/local/bin/chkrootkit /usr/bin/chkrootkit /opt/security/tools/chkrootkit-master/chkrootkit $(command -v chkrootkit 2>/dev/null); do
+    if [ -f "$path" ] && [ -x "$path" ]; then
+        CHKROOTKIT_CMD="$path"
+        break
+    fi
+done
+
+# 檢查 chkrootkit 是否找到
+if [ -z "$CHKROOTKIT_CMD" ]; then
+    log_and_echo "  ❌ chkrootkit 未安裝或找不到"
+    log_and_echo "    請執行安裝腳本安裝 chkrootkit"
     ROOTKIT_WARNINGS=0
 else
+    log_and_echo "  📍 使用: $CHKROOTKIT_CMD"
     # 執行掃描（不依賴退出碼，因為 chkrootkit 發現問題時會返回非零）
-    nice -n 19 ionice -c3 chkrootkit > $CHKROOTKIT_LOG 2>&1 || true
+    nice -n 19 ionice -c3 "$CHKROOTKIT_CMD" > $CHKROOTKIT_LOG 2>&1 || true
     
     # 檢查日誌文件是否存在且有內容
     if [ -f "$CHKROOTKIT_LOG" ] && [ -s "$CHKROOTKIT_LOG" ]; then
@@ -1031,6 +1058,7 @@ rm -f /opt/security/tools/chkrootkit.zip
 rm -f /tmp/maldetect.tar.gz
 
 # 刪除解壓縮後的暫存目錄（只保留最終安裝目錄）
+# 注意：chkrootkit 已複製到 /usr/local/bin，可以安全刪除源目錄
 rm -rf /opt/security/tools/chkrootkit-master
 rm -rf /tmp/maldetect-*
 
