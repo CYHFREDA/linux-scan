@@ -1020,6 +1020,19 @@ else
     if [ -f "$LYNIS_LOG" ] && [ -s "$LYNIS_LOG" ]; then
         LYNIS_WARNINGS=$(grep -c 'Warning:' $LYNIS_LOG 2>/dev/null || echo 0)
         LYNIS_SUGGESTIONS=$(grep -c 'Suggestion:' $LYNIS_LOG 2>/dev/null || echo 0)
+        
+        # 移除可能的換行符和空格，確保是純數字
+        LYNIS_WARNINGS=$(echo "$LYNIS_WARNINGS" | tr -d '\n\r ' | grep -oE '[0-9]+' || echo 0)
+        LYNIS_SUGGESTIONS=$(echo "$LYNIS_SUGGESTIONS" | tr -d '\n\r ' | grep -oE '[0-9]+' || echo 0)
+        
+        # 確保是數字
+        if ! [[ "$LYNIS_WARNINGS" =~ ^[0-9]+$ ]]; then
+            LYNIS_WARNINGS=0
+        fi
+        if ! [[ "$LYNIS_SUGGESTIONS" =~ ^[0-9]+$ ]]; then
+            LYNIS_SUGGESTIONS=0
+        fi
+        
         log_and_echo "  ✅ Lynis 掃描完成 - 警告: $LYNIS_WARNINGS, 建議: $LYNIS_SUGGESTIONS"
     else
         LYNIS_WARNINGS=0
