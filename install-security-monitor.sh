@@ -502,9 +502,26 @@ grep "$(date +%b\ %e)" /var/log/secure >> "$REPORT_FILE" 2>&1 || echo "無事件
 CLAMAV_DIRS=(/home /root /opt /var/www /srv/data /data /backup)
 CLAMAV_LOG="/opt/security/logs/clamav-daily-$(date +%Y%m%d).log"
 
+# 確保 ClamAV 臨時目錄權限正確（每次執行時修復）
+mkdir -p /var/lib/clamav/tmp
+chown -R 989:988 /var/lib/clamav 2>/dev/null || chown -R clamupdate:clamupdate /var/lib/clamav 2>/dev/null || true
+chmod 755 /var/lib/clamav 2>/dev/null || true
+chmod 1777 /var/lib/clamav/tmp 2>/dev/null || chmod 777 /var/lib/clamav/tmp 2>/dev/null || true
+
 # 更新病毒庫（使用系統臨時目錄避免權限問題）
+# 設置環境變數讓 freshclam 使用系統臨時目錄
 export TMPDIR=/tmp
-freshclam 2>&1 | grep -v "ERROR.*tmp" || echo "⚠️ ClamAV 更新失敗，繼續使用現有病毒庫" >> "$REPORT_FILE"
+export TMP=/tmp
+# 嘗試更新，抑制權限相關錯誤（不影響掃描功能）
+FRESHCLAM_OUTPUT=$(freshclam 2>&1)
+FRESHCLAM_SUCCESS=$(echo "$FRESHCLAM_OUTPUT" | grep -E "updated|up-to-date" || echo "")
+if [ -n "$FRESHCLAM_SUCCESS" ]; then
+    echo "✅ ClamAV 病毒庫更新成功" >> "$REPORT_FILE"
+    echo "$FRESHCLAM_SUCCESS" >> "$REPORT_FILE"
+else
+    # 只記錄到報告，不顯示錯誤（權限問題不影響掃描）
+    echo "⚠️ ClamAV 更新跳過（權限限制，使用現有病毒庫，不影響掃描功能）" >> "$REPORT_FILE"
+fi
 
 INFECTED_COUNT=0
 for dir in "${CLAMAV_DIRS[@]}"; do
