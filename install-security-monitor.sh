@@ -680,13 +680,14 @@ echo "=== 今日 Audit 事件摘要 ===" >> "$REPORT_FILE"
 # 排除正常的讀取操作，減少誤報
 # 注意：標準權限設置（如 chmod 0440 /etc/sudoers）也會被記錄，這是正常的審計行為
 # 過濾標準權限設置：
-# - 0440 (0x120 十六進制) = sudoers 標準權限
-# - 0644 (0x1a4 十六進制) = passwd 標準權限  
-# - 0000 (0x0) = shadow 標準權限（但通常不會用 chmod 設置）
+# - 0440 (0x120 十六進制, 288 十進制) = sudoers 標準權限
+# - 0644 (0x1a4 十六進制, 420 十進制) = passwd 標準權限  
+# - 0600 (0x180 十六進制, 384 十進制) = shadow 標準權限
+# 同時過濾十進制和十六進制格式的權限值
 AUDIT_EVENTS=$(ausearch -ts today 2>/dev/null | \
     grep -E 'passwd|sudoers|shadow|sshd_config' | \
     grep -E 'type=SYSCALL.*(write|unlink|chmod|chown|execve)|type=PATH.*(w=|unlink|chmod|chown)' | \
-    grep -vE 'a2=0x120|a2=0x1a4|a2=0x180|chmod.*0440|chmod.*0644|chmod.*0600|proctitle=.*chmod.*0440' | \
+    grep -vE 'a2=120|a2=0x120|a2=420|a2=0x1a4|a2=384|a2=0x180|chmod.*0440|chmod.*0644|chmod.*0600|proctitle=.*chmod.*0440' | \
     wc -l 2>/dev/null || echo 0)
 
 # 確保是數字
@@ -737,9 +738,16 @@ if [ "$AUDIT_EVENTS" -gt 0 ]; then
         echo "✅ 無可疑操作（所有操作都是標準權限設置或正常維護）" >> "$REPORT_FILE"
         echo "說明：chmod 0440 /etc/sudoers 等標準權限設置已被過濾" >> "$REPORT_FILE"
     fi
-    log_and_echo "  ⚠️ Audit 檢查完成 - 可疑操作: $AUDIT_EVENTS"
-    log_and_echo "    快速查看: grep -A 20 '⚠️ 可疑操作' $REPORT_FILE"
-    log_and_echo "    💡 提示：標準權限設置（如 chmod 0440）已排除，這些是正常的維護操作"
+    
+    # 根據實際過濾結果顯示正確的統計
+    if [ "$AUDIT_EVENTS" -gt 0 ]; then
+        log_and_echo "  ⚠️ Audit 檢查完成 - 可疑操作: $AUDIT_EVENTS"
+        log_and_echo "    快速查看: grep -A 20 '可疑操作' $REPORT_FILE"
+        log_and_echo "    💡 提示：標準權限設置（如 chmod 0440）已排除，這些是正常的維護操作"
+    else
+        log_and_echo "  ✅ Audit 檢查完成 - 無可疑操作"
+        log_and_echo "    💡 提示：所有操作都是標準權限設置或正常維護"
+    fi
 else
     log_and_echo "  ✅ Audit 檢查完成 - 無可疑操作"
 fi
